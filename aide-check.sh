@@ -2,15 +2,14 @@
 set -euo pipefail
 umask 077
 
-DATE_STAMP=$(date +%F.%H%M)
-REPORT_DIR=/var/log/aide/reports
-DB_ARCHIVE=/var/lib/aide/archive
-mkdir -p "$REPORT_DIR" "$DB_ARCHIVE"
-LOG_FILE="$REPORT_DIR/aide_report_$DATE_STAMP.log"
-ADMIN_EMAIL="sysadmin@example.com"
+source /etc/soc2-scripts/config/common.conf
+source /etc/soc2-scripts/config/aide-check.conf
+
+DATE_STAMP=$(date +%Y%m%d)
+LOG_FILE="${REPORT_DIR}/aide_report_${DATE_STAMP}.log"
 
 # run the check
-/usr/bin/aide --check --config=/etc/aide/aide.conf > "$LOG_FILE"
+/usr/bin/aide --check --config=/etc/aide/aide.conf > "$LOG_FILE" 2>&1
 
 # alert if critical paths changed
 if grep -qE '[a-z]\+.*(/etc/|/boot/|/usr/local/bin/|/var/log/archives/)' "$LOG_FILE"; then
