@@ -1,83 +1,121 @@
 #!/bin/bash
 set -euo pipefail
-umask 077
 
-# Load configuration files following established pattern
+# Simple Lynis security scanner with Grafana Cloud integration
+# Focuses on security assessment without unnecessary complexity
+
+# Load configuration from SOC2 config files
 source /usr/local/share/soc2-scripts/config/common.conf
 source /usr/local/share/soc2-scripts/config/lynis-scan.conf
 
-# Generate timestamped filenames for audit trail
+# Generate timestamped filenames
 DATE_STAMP=$(date +%Y%m%d)
-REPORT_FILE="${LOG_DIR}/report-${DATE_STAMP}.txt"
-LOG_FILE="${LOG_DIR}/scan-${DATE_STAMP}.log"
+REPORT_FILE="$LOG_DIR/report-$DATE_STAMP.txt"
+LOG_FILE="$LOG_DIR/scan-$DATE_STAMP.log"
 
-# Log scan initiation to syslog for Grafana Cloud integration
-logger -p daemon.notice "LYNIS SECURITY SCAN: Starting comprehensive security assessment"
+# Grafana-friendly logging function
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+    # Use 'lynis' tag so rsyslog routes to Grafana Cloud logs
+    logger -t lynis "$1"
+}
 
-# Ensure log directory exists with proper permissions
-if [ ! -d "$LOG_DIR" ]; then
-    mkdir -p "$LOG_DIR"
-    chmod 750 "$LOG_DIR"
-fi
+# Ensure log directory exists
+mkdir -p "$LOG_DIR"
 
-# Execute comprehensive Lynis scan (removed --quick for thorough SOC 2 compliance assessment)
-# The scan examines system configuration, security settings, and compliance posture
-if ! /usr/bin/lynis audit system --logfile "$LOG_FILE" --report-file "$REPORT_FILE" --profile /etc/lynis/custom.prf; then
-    # Log failure to syslog for monitoring integration
-    logger -p daemon.error "LYNIS SECURITY SCAN: Scan execution failed - check system status"
-    echo "Lynis scan execution failed on $(date)" | mail -s "[SECURITY ERROR] Lynis scan failed - $(hostname) - ${DATE_STAMP}" "$ADMIN_EMAIL"
+log_message "Starting Lynis security assessment"
+
+# Run Lynis scan
+if lynis audit system --logfile "$LOG_FILE" --report-file "$REPORT_FILE" --profile /etc/lynis/custom.prf 2>/dev/null; then
+    SCAN_STATUS="success"
+else
+    SCAN_STATUS="failed"
+    log_message "ERROR: Lynis scan execution failed"
+    echo "Lynis scan failed on $(hostname) at $(date)" | mail -s "[SECURITY ERROR] Lynis Scan Failed" "$ADMIN_EMAIL"
     exit 1
 fi
 
-# Count security findings using comprehensive pattern matching
-# Lynis uses varied terminology for different finding types and severities
-WARNINGS=$(grep -c "Warning:" "$REPORT_FILE" 2>/dev/null || echo 0)
-SUGGESTIONS=$(grep -c "Suggestion:" "$REPORT_FILE" 2>/dev/null || echo 0)
-MANUAL_ITEMS=$(grep -c "Manual:" "$REPORT_FILE" 2>/dev/null || echo 0)
+# Count findings with bulletproof number extraction
+WARNINGS=$(grep -c "Warning:" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
+SUGGESTIONS=$(grep -c "Suggestion:" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
+MANUAL_ITEMS=$(grep -c "Manual:" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
+
+# Validate they're actually numbers
+[[ "$WARNINGS" =~ ^[0-9]+$ ]] || WARNINGS="0"
+[[ "$SUGGESTIONS" =~ ^[0-9]+$ ]] || SUGGESTIONS="0"
+[[ "$MANUAL_ITEMS" =~ ^[0-9]+$ ]] || MANUAL_ITEMS="0"
+
 TOTAL_ISSUES=$((WARNINGS + SUGGESTIONS + MANUAL_ITEMS))
 
-# Extract hardening index for trend monitoring
-HARDENING_INDEX=$(grep "Hardening index" "$REPORT_FILE" | awk '{print $4}' | tr -d '[]' || echo "Unknown")
+# Extract hardening index
+HARDENING_INDEX=$(grep "Hardening index" "$REPORT_FILE" 2>/dev/null | awk '{print $4}' | tr -d '[]' || echo "Unknown")
 
-# Append scan summary with context for administrator review
-{
-    echo ""
-    echo "=================================="
-    echo "SCAN SUMMARY"
-    echo "=================================="
-    echo "Scan completed: $(date)"
-    echo "Host: $(hostname)"
-    echo "Warnings found: $WARNINGS"
-    echo "Suggestions found: $SUGGESTIONS"
-    echo "Manual review items: $MANUAL_ITEMS"
-    echo "Total findings: $TOTAL_ISSUES"
-    echo "Hardening index: $HARDENING_INDEX"
-    echo ""
-    echo "Log file: $LOG_FILE"
-    echo "Full report: $REPORT_FILE"
-} >> "$REPORT_FILE"
+# Log structured metrics for Grafana
+logger -t lynis "SECURITY_SCAN: warnings=$WARNINGS suggestions=$SUGGESTIONS manual=$MANUAL_ITEMS total=$TOTAL_ISSUES hardening_index=$HARDENING_INDEX"
 
-# Send appropriate notification based on findings
-if [ "$TOTAL_ISSUES" -gt 0 ]; then
-    # Log significant findings to syslog for security monitoring
-    logger -p daemon.warning "LYNIS SECURITY SCAN: Found $TOTAL_ISSUES security findings requiring review"
+# Handle results - always email for audit trail
+if [ "$WARNINGS" -gt 0 ]; then
+    log_message "Security scan completed - $WARNINGS warnings requiring attention"
+    {
+        echo "Lynis security scan found $WARNINGS warnings on $(hostname)"
+        echo ""
+        echo "Scan Results:"
+        echo "- Warnings: $WARNINGS (require attention)"
+        echo "- Suggestions: $SUGGESTIONS (recommendations)"
+        echo "- Manual items: $MANUAL_ITEMS (review needed)"
+        echo "- Total findings: $TOTAL_ISSUES"
+        echo "- Hardening index: $HARDENING_INDEX"
+        echo ""
+        echo "Key warnings found:"
+        grep "Warning:" "$REPORT_FILE" | head -10
+        if [ "$WARNINGS" -gt 10 ]; then
+            echo ""
+            echo "(Showing first 10 of $WARNINGS warnings)"
+        fi
+        echo ""
+        echo "Full report attached below:"
+        echo "=========================="
+        cat "$REPORT_FILE"
+    } | mail -s "[SECURITY WARNING] Lynis Scan - $WARNINGS warnings - $(hostname)" "$ADMIN_EMAIL"
 
-    # Email detailed results to administrators
-    mail -s "[SECURITY] Lynis scan - $TOTAL_ISSUES findings on $(hostname) - ${DATE_STAMP}" "$ADMIN_EMAIL" < "$REPORT_FILE"
+elif [ "$TOTAL_ISSUES" -gt 0 ]; then
+    log_message "Security scan completed - $TOTAL_ISSUES findings (suggestions/manual only)"
+    {
+        echo "Lynis security scan completed on $(hostname)"
+        echo ""
+        echo "Scan Results:"
+        echo "- Warnings: $WARNINGS"
+        echo "- Suggestions: $SUGGESTIONS (recommendations)"
+        echo "- Manual items: $MANUAL_ITEMS (review needed)"
+        echo "- Total findings: $TOTAL_ISSUES"
+        echo "- Hardening index: $HARDENING_INDEX"
+        echo ""
+        echo "No critical warnings found - system security posture is good."
+        echo ""
+        echo "Full report attached below:"
+        echo "=========================="
+        cat "$REPORT_FILE"
+    } | mail -s "[Lynis] Security Scan - $TOTAL_ISSUES suggestions - $(hostname)" "$ADMIN_EMAIL"
+
 else
-    # Log clean scan result for compliance tracking
-    logger -p daemon.notice "LYNIS SECURITY SCAN: No security issues found - system hardening verified"
-
-    # Send confirmation of clean scan
-    mail -s "[SECURITY] Lynis scan - No issues found on $(hostname) - ${DATE_STAMP}" "$ADMIN_EMAIL" < "$REPORT_FILE"
+    log_message "Security scan completed - no issues found"
+    {
+        echo "Lynis security scan completed successfully on $(hostname)"
+        echo ""
+        echo "Scan Results:"
+        echo "- Warnings: $WARNINGS"
+        echo "- Suggestions: $SUGGESTIONS"
+        echo "- Manual items: $MANUAL_ITEMS"
+        echo "- Total findings: $TOTAL_ISSUES"
+        echo "- Hardening index: $HARDENING_INDEX"
+        echo ""
+        echo "Excellent! No security issues found."
+        echo "This is a routine security assessment confirmation."
+        echo ""
+        echo "Full report attached below:"
+        echo "=========================="
+        cat "$REPORT_FILE"
+    } | mail -s "[Lynis] Security Scan - Clean - $(hostname)" "$ADMIN_EMAIL"
 fi
 
-# Create convenience symlinks for quick access to latest results
-# These help administrators quickly access current scan status
-ln -sf "$LOG_FILE" "${LOG_DIR}/latest_scan.log" 2>/dev/null || true
-ln -sf "$REPORT_FILE" "${LOG_DIR}/latest_report.txt" 2>/dev/null || true
-
-# Log successful completion for audit trail
-logger -p daemon.notice "LYNIS SECURITY SCAN: Completed successfully with $TOTAL_ISSUES findings"
-
-exit 0
+log_message "Security assessment completed"
