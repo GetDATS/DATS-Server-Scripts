@@ -36,9 +36,9 @@ else
 fi
 
 # Count findings with bulletproof number extraction
-WARNINGS=$(grep -c "Warning:" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
-SUGGESTIONS=$(grep -c "Suggestion:" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
-MANUAL_ITEMS=$(grep -c "Manual:" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
+WARNINGS=$(grep -c "warning\[\]" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
+SUGGESTIONS=$(grep -c "suggestion\[\]" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
+MANUAL_ITEMS=$(grep -c "manual\[\]" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
 
 # Validate they're actually numbers
 [[ "$WARNINGS" =~ ^[0-9]+$ ]] || WARNINGS="0"
@@ -48,7 +48,7 @@ MANUAL_ITEMS=$(grep -c "Manual:" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\
 TOTAL_ISSUES=$((WARNINGS + SUGGESTIONS + MANUAL_ITEMS))
 
 # Extract hardening index
-HARDENING_INDEX=$(grep "Hardening index" "$REPORT_FILE" 2>/dev/null | awk '{print $4}' | tr -d '[]' || echo "Unknown")
+HARDENING_INDEX=$(grep "^hardening_index=" "$REPORT_FILE" 2>/dev/null | cut -d'=' -f2 || echo "Unknown")
 
 # Log structured metrics for Grafana
 logger -t lynis "SECURITY_SCAN: warnings=$WARNINGS suggestions=$SUGGESTIONS manual=$MANUAL_ITEMS total=$TOTAL_ISSUES hardening_index=$HARDENING_INDEX"
@@ -67,7 +67,7 @@ if [ "$WARNINGS" -gt 0 ]; then
         echo "- Hardening index: $HARDENING_INDEX"
         echo ""
         echo "Key warnings found:"
-        grep "Warning:" "$REPORT_FILE" | head -10
+        grep "warning\[\]" "$REPORT_FILE" | head -10
         if [ "$WARNINGS" -gt 10 ]; then
             echo ""
             echo "(Showing first 10 of $WARNINGS warnings)"
