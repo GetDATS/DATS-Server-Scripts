@@ -55,17 +55,31 @@ logger -t aide "INTEGRITY_CHECK: total_changes=$TOTAL_CHANGES critical_changes=$
 if [ "$CRITICAL_CHANGES" -gt 0 ]; then
     log_message "CRITICAL: $CRITICAL_CHANGES critical system files changed"
     {
-        echo "AIDE detected $CRITICAL_CHANGES critical system file changes on $(hostname)"
-        echo "Total changes: $TOTAL_CHANGES"
+        echo "🚨 AIDE DETECTED CRITICAL SYSTEM CHANGES 🚨"
+        echo "============================================"
         echo ""
-        echo "Critical changes in system directories:"
-        grep -E "^f[+\.-].*/etc/|^f[+\.-].*/boot/|^f[+\.-].*/usr/local/bin/" "$AIDE_RESULT" | head -20
-        if [ "$CRITICAL_CHANGES" -gt 20 ]; then
-            echo ""
-            echo "(Showing first 20 of $CRITICAL_CHANGES critical changes)"
-        fi
+        echo "HOST: $(hostname)"
+        echo "DATE: $(date)"
         echo ""
-        echo "Full AIDE output:"
+        echo "⚠️  CRITICAL FILES CHANGED ($CRITICAL_CHANGES):"
+        echo "----------------------------------------"
+        grep -E "^f[+\.-].*/etc/|^f[+\.-].*/boot/|^f[+\.-].*/usr/local/bin/" "$AIDE_RESULT" | while read line; do
+            echo "   → $(echo "$line" | awk '{print $2}')"
+        done
+        echo ""
+        echo "📊 SUMMARY:"
+        echo "   • Critical changes: $CRITICAL_CHANGES"
+        echo "   • Total changes: $TOTAL_CHANGES"
+        echo "   • Log file changes: $((TOTAL_CHANGES - CRITICAL_CHANGES))"
+        echo ""
+        echo "🔍 WHAT TO DO:"
+        echo "   1. Review the critical files listed above"
+        echo "   2. Verify these changes were authorized"
+        echo "   3. Update AIDE baseline if changes are legitimate"
+        echo ""
+        echo "📋 DETAILED TECHNICAL OUTPUT:"
+        echo "============================"
+        echo ""
         cat "$AIDE_RESULT"
     } | mail -s "[SECURITY CRITICAL] AIDE - $CRITICAL_CHANGES critical system changes - $(hostname)" "$ADMIN_EMAIL"
 
