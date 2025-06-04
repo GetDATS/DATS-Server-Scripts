@@ -1,137 +1,129 @@
 #!/bin/bash
 set -euo pipefail
-umask 077
 
-# Load configuration files following established pattern
+# Simple auditd report with Grafana Cloud integration
+# Focuses on security events without insane complexity
+
+# Load configuration from SOC2 config files
 source /usr/local/share/soc2-scripts/config/common.conf
 source /usr/local/share/soc2-scripts/config/auditd-report.conf
 
-# Generate timestamped filenames for audit trail
-DATE_STAMP=$(date +%Y%m%d)
-REPORT_FILE="${LOG_DIR}/daily-report-${DATE_STAMP}.txt"
-TEMP_FILE="/tmp/auditd-${DATE_STAMP}.tmp"
+LOG_FILE="$LOG_DIR/auditd-report.log"
 
-# Log report generation to syslog for Grafana Cloud integration
-logger -p daemon.notice "AUDITD REPORT: Starting daily audit report generation"
+# Grafana-friendly logging function
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+    # Use 'auditd' tag so rsyslog routes to Grafana Cloud logs
+    logger -t auditd "$1"
+}
 
-# Ensure log directory exists with proper permissions
-if [ ! -d "$LOG_DIR" ]; then
-    logger -p daemon.error "AUDITD REPORT: Log directory missing - audit logging may be compromised"
-    echo "CRITICAL: Audit log directory missing at $LOG_DIR" | mail -s "[SECURITY CRITICAL] Audit logging failure - $(hostname)" "$ADMIN_EMAIL"
+# Check if auditd is running and has data
+if ! systemctl is-active --quiet auditd; then
+    log_message "ERROR: auditd service not running"
+    echo "Auditd service is not running on $(hostname)" | mail -s "[SECURITY ERROR] Auditd Not Running" "$ADMIN_EMAIL"
     exit 1
 fi
 
-# Extract yesterday's audit events for analysis
-# Using raw format for easier parsing and correlation
-if ! ausearch --start yesterday --end today --format raw > "$TEMP_FILE" 2>/dev/null; then
-    logger -p daemon.warning "AUDITD REPORT: No audit events found for yesterday - this may indicate a problem"
-    echo "No audit events captured for $(date -d yesterday +%F)" > "$TEMP_FILE"
+log_message "Starting daily audit report"
+
+# Get yesterday's audit events
+AUDIT_RESULT=$(mktemp)
+if ! ausearch --start yesterday --end today --format text > "$AUDIT_RESULT" 2>/dev/null; then
+    log_message "WARNING: No audit events found for yesterday"
+    echo "No audit events found for $(date -d yesterday +%F)" > "$AUDIT_RESULT"
 fi
 
-# Initialize report with header information
-{
-    echo "AUDITD DAILY SECURITY REPORT"
-    echo "============================"
-    echo "Generated: $(date)"
-    echo "Host: $(hostname)"
-    echo "Report Period: $(date -d yesterday +%F) 00:00:00 - 23:59:59"
-    echo ""
-} > "$REPORT_FILE"
+# Count security events with bulletproof parsing
+FAILED_LOGINS=$(grep -c "authentication failure\|failed login\|FAILED_LOGIN" "$AUDIT_RESULT" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
+SUDO_COMMANDS=$(grep -c "sudo:" "$AUDIT_RESULT" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
+CRITICAL_FILE_CHANGES=$(grep -cE "/etc/passwd|/etc/shadow|/etc/sudoers|/etc/ssh/" "$AUDIT_RESULT" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
+TOTAL_EVENTS=$(wc -l < "$AUDIT_RESULT" 2>/dev/null | tr -d '\n\r\t ' || echo "0")
 
-# Count total events for volume assessment
-TOTAL_EVENTS=$(wc -l < "$TEMP_FILE" 2>/dev/null || echo 0)
+# Validate numbers
+[[ "$FAILED_LOGINS" =~ ^[0-9]+$ ]] || FAILED_LOGINS="0"
+[[ "$SUDO_COMMANDS" =~ ^[0-9]+$ ]] || SUDO_COMMANDS="0"
+[[ "$CRITICAL_FILE_CHANGES" =~ ^[0-9]+$ ]] || CRITICAL_FILE_CHANGES="0"
+[[ "$TOTAL_EVENTS" =~ ^[0-9]+$ ]] || TOTAL_EVENTS="0"
 
-# Parse security-relevant events with comprehensive pattern matching
-# Authentication failures indicate potential brute force attempts
-FAILED_LOGIN_COUNT=$(grep -Ei 'res=failed|res=0|FAILED' "$TEMP_FILE" 2>/dev/null | grep -E 'type=USER_LOGIN|type=USER_AUTH' | wc -l || echo 0)
+# Calculate concern level
+SECURITY_CONCERNS=$((FAILED_LOGINS + CRITICAL_FILE_CHANGES))
 
-# Privilege escalation attempts may indicate compromise attempts
-PRIV_ESCALATION_COUNT=$(grep -E 'type=USER_CMD|type=USER_START' "$TEMP_FILE" 2>/dev/null | grep -E 'exe="/usr/bin/sudo"|exe="/bin/su"' | wc -l || echo 0)
+# Log structured metrics for Grafana
+logger -t auditd "AUDIT_REPORT: failed_logins=$FAILED_LOGINS sudo_commands=$SUDO_COMMANDS critical_changes=$CRITICAL_FILE_CHANGES total_events=$TOTAL_EVENTS"
 
-# File modifications to critical system files
-CRITICAL_CHANGES=$(grep -E 'type=PATH' "$TEMP_FILE" 2>/dev/null | grep -E '/etc/passwd|/etc/shadow|/etc/sudoers|/etc/ssh/sshd_config' | wc -l || echo 0)
-
-# Configuration changes that could weaken security
-CONFIG_CHANGES=$(grep -E 'key="(audit_config_changes|auth_config_changes|ssh_config_changes)"' "$TEMP_FILE" 2>/dev/null | wc -l || echo 0)
-
-# File deletions that might indicate covering tracks
-FILE_DELETIONS=$(grep -E 'key="file_deletion"' "$TEMP_FILE" 2>/dev/null | wc -l || echo 0)
-
-# Generate summary statistics section
-{
-    echo "SUMMARY STATISTICS"
-    echo "=================="
-    echo "Total audit events: $TOTAL_EVENTS"
-    echo "Failed login attempts: $FAILED_LOGIN_COUNT"
-    echo "Privilege escalations: $PRIV_ESCALATION_COUNT"
-    echo "Critical file changes: $CRITICAL_CHANGES"
-    echo "Configuration changes: $CONFIG_CHANGES"
-    echo "File deletions tracked: $FILE_DELETIONS"
-    echo ""
-} >> "$REPORT_FILE"
-
-# Detailed analysis sections for significant events
-if [ "$FAILED_LOGIN_COUNT" -gt 0 ]; then
+# Handle results based on what we found
+if [ "$SECURITY_CONCERNS" -gt 5 ]; then
+    log_message "CRITICAL: $SECURITY_CONCERNS security events requiring immediate attention"
     {
-        echo "AUTHENTICATION FAILURES"
-        echo "======================"
-        grep -Ei 'res=failed|res=0|FAILED' "$TEMP_FILE" 2>/dev/null | grep -E 'type=USER_LOGIN|type=USER_AUTH' | head -10 || echo "No details available"
-        if [ "$FAILED_LOGIN_COUNT" -gt 10 ]; then
-            echo "... and $((FAILED_LOGIN_COUNT - 10)) more entries"
+        echo "🚨 CRITICAL SECURITY EVENTS DETECTED 🚨"
+        echo "======================================="
+        echo ""
+        echo "HOST: $(hostname)"
+        echo "PERIOD: $(date -d yesterday +%F)"
+        echo ""
+        echo "⚠️  SECURITY EVENTS:"
+        echo "   • Failed logins: $FAILED_LOGINS"
+        echo "   • Critical file changes: $CRITICAL_FILE_CHANGES"
+        echo "   • Sudo commands: $SUDO_COMMANDS"
+        echo "   • Total audit events: $TOTAL_EVENTS"
+        echo ""
+        if [ "$FAILED_LOGINS" -gt 0 ]; then
+            echo "🔍 FAILED LOGIN ATTEMPTS:"
+            grep -i "authentication failure\|failed login" "$AUDIT_RESULT" | head -10
+            echo ""
         fi
-        echo ""
-    } >> "$REPORT_FILE"
-fi
+        if [ "$CRITICAL_FILE_CHANGES" -gt 0 ]; then
+            echo "🔍 CRITICAL FILE CHANGES:"
+            grep -E "/etc/passwd|/etc/shadow|/etc/sudoers|/etc/ssh/" "$AUDIT_RESULT" | head -10
+            echo ""
+        fi
+        echo "📋 FULL AUDIT OUTPUT:"
+        echo "===================="
+        cat "$AUDIT_RESULT"
+    } | mail -s "[SECURITY CRITICAL] Audit Report - $SECURITY_CONCERNS security events - $(hostname)" "$ADMIN_EMAIL"
 
-if [ "$CRITICAL_CHANGES" -gt 0 ]; then
-    {
-        echo "CRITICAL FILE MODIFICATIONS"
-        echo "=========================="
-        grep -E 'type=PATH' "$TEMP_FILE" 2>/dev/null | grep -E '/etc/passwd|/etc/shadow|/etc/sudoers|/etc/ssh/sshd_config' | head -5 || echo "No details available"
-        echo ""
-    } >> "$REPORT_FILE"
-fi
-
-# Append report metadata for audit trail
-{
-    echo "REPORT INFORMATION"
-    echo "=================="
-    echo "Report generated by: $(basename "$0")"
-    echo "Temporary data file: $TEMP_FILE (cleaned)"
-    echo "Report location: $REPORT_FILE"
-    echo "Compressed archive: ${REPORT_FILE}.gz"
-} >> "$REPORT_FILE"
-
-# Calculate security concern level for appropriate alerting
-SECURITY_CONCERNS=$((FAILED_LOGIN_COUNT + CRITICAL_CHANGES + CONFIG_CHANGES))
-
-# Send notification based on severity of findings
-if [ "$SECURITY_CONCERNS" -gt 10 ]; then
-    # Critical security events requiring immediate attention
-    logger -p daemon.crit "AUDITD REPORT: CRITICAL - $SECURITY_CONCERNS security events detected requiring immediate review"
-    mail -s "[SECURITY CRITICAL] Audit Report - $SECURITY_CONCERNS security events - $(hostname) - $(date +%F)" "$ADMIN_EMAIL" < "$REPORT_FILE"
 elif [ "$SECURITY_CONCERNS" -gt 0 ]; then
-    # Notable security events requiring review
-    logger -p daemon.warning "AUDITD REPORT: WARNING - $SECURITY_CONCERNS security events detected"
-    mail -s "[SECURITY WARNING] Audit Report - $SECURITY_CONCERNS security events - $(hostname) - $(date +%F)" "$ADMIN_EMAIL" < "$REPORT_FILE"
+    log_message "WARNING: $SECURITY_CONCERNS security events detected"
+    {
+        echo "Audit report for $(hostname) - $(date -d yesterday +%F)"
+        echo ""
+        echo "Security Events Summary:"
+        echo "• Failed logins: $FAILED_LOGINS"
+        echo "• Critical file changes: $CRITICAL_FILE_CHANGES"
+        echo "• Sudo commands: $SUDO_COMMANDS"
+        echo "• Total audit events: $TOTAL_EVENTS"
+        echo ""
+        if [ "$FAILED_LOGINS" -gt 0 ]; then
+            echo "Failed login details:"
+            grep -i "authentication failure\|failed login" "$AUDIT_RESULT" | head -5
+            echo ""
+        fi
+        if [ "$CRITICAL_FILE_CHANGES" -gt 0 ]; then
+            echo "Critical file changes:"
+            grep -E "/etc/passwd|/etc/shadow|/etc/sudoers|/etc/ssh/" "$AUDIT_RESULT" | head -5
+            echo ""
+        fi
+    } | mail -s "[SECURITY WARNING] Audit Report - $SECURITY_CONCERNS events - $(hostname)" "$ADMIN_EMAIL"
+
 else
-    # Clean report for compliance records
-    logger -p daemon.notice "AUDITD REPORT: No significant security events detected"
-    mail -s "[AUDIT] Daily Audit Report - Clean - $(hostname) - $(date +%F)" "$ADMIN_EMAIL" < "$REPORT_FILE"
+    log_message "Daily audit report completed - no security concerns"
+    {
+        echo "Daily audit report for $(hostname) - $(date -d yesterday +%F)"
+        echo ""
+        echo "Security Status: ✅ Clean"
+        echo ""
+        echo "Activity Summary:"
+        echo "• Failed logins: $FAILED_LOGINS"
+        echo "• Critical file changes: $CRITICAL_FILE_CHANGES"
+        echo "• Sudo commands: $SUDO_COMMANDS"
+        echo "• Total audit events: $TOTAL_EVENTS"
+        echo ""
+        echo "No security concerns detected."
+        echo "This is a routine audit report confirmation."
+    } | mail -s "[Audit] Daily Report - Clean - $(hostname)" "$ADMIN_EMAIL"
 fi
 
-# Compress report for efficient storage
-if [ -f "$REPORT_FILE" ]; then
-    gzip -9 "$REPORT_FILE"
+# Clean up
+rm -f "$AUDIT_RESULT"
 
-    # Create convenience symlink to latest compressed report
-    ln -sf "${REPORT_FILE}.gz" "${LOG_DIR}/latest-daily-report.gz" 2>/dev/null || true
-fi
-
-# Clean up temporary file securely
-[ -f "$TEMP_FILE" ] && shred -zu "$TEMP_FILE" 2>/dev/null || rm -f "$TEMP_FILE"
-
-# Log successful completion for monitoring
-logger -p daemon.notice "AUDITD REPORT: Daily report completed successfully with $SECURITY_CONCERNS security events"
-
-exit 0
+log_message "Daily audit report completed"
