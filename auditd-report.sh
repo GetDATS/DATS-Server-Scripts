@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Simple auditd health check for SOC 2 compliance
+# Simple auditd health check for SOC 2 compliance with Datadog integration
 # Focus: Ensure auditd is working, not complex daily reporting
 
 # Load configuration
@@ -9,7 +9,7 @@ source /usr/local/share/soc2-scripts/config/common.conf
 
 LOG_FILE="/var/log/audit/auditd-health.log"
 
-# Simple logging
+# Simple logging with Datadog-compatible structured metrics
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
     logger -t auditd "$1"
@@ -20,6 +20,7 @@ log_message "Starting auditd health check"
 # Check 1: Is auditd running?
 if ! systemctl is-active --quiet auditd; then
     log_message "CRITICAL: auditd service not running"
+    logger -t auditd "HEALTH_CHECK: status=critical service_running=false"
     echo "CRITICAL: Auditd service is not running on $(hostname)" | mail -s "[SECURITY CRITICAL] Auditd Service Down" "$ADMIN_EMAIL"
     exit 1
 fi
@@ -28,6 +29,7 @@ fi
 RULES_COUNT=$(auditctl -l | wc -l)
 if [ "$RULES_COUNT" -lt 10 ]; then
     log_message "WARNING: Only $RULES_COUNT audit rules loaded"
+    logger -t auditd "HEALTH_CHECK: status=warning service_running=true rules_loaded=$RULES_COUNT"
     echo "WARNING: Auditd has only $RULES_COUNT rules loaded on $(hostname)" | mail -s "[SECURITY WARNING] Auditd Rules Issue" "$ADMIN_EMAIL"
 else
     log_message "Auditd rules loaded: $RULES_COUNT"
@@ -37,6 +39,7 @@ fi
 AUDIT_LOG="/var/log/audit/audit.log"
 if [ ! -f "$AUDIT_LOG" ]; then
     log_message "CRITICAL: Audit log file missing"
+    logger -t auditd "HEALTH_CHECK: status=critical service_running=true log_file_exists=false"
     echo "CRITICAL: Audit log file missing on $(hostname)" | mail -s "[SECURITY CRITICAL] Auditd Log Missing" "$ADMIN_EMAIL"
     exit 1
 fi
@@ -44,6 +47,7 @@ fi
 # Check when last audit entry was written (just verify log is active)
 if [ ! -s "$AUDIT_LOG" ]; then
     log_message "CRITICAL: Audit log appears empty"
+    logger -t auditd "HEALTH_CHECK: status=critical service_running=true log_file_exists=true log_file_empty=true"
     echo "CRITICAL: Audit log appears empty on $(hostname)" | mail -s "[SECURITY CRITICAL] Auditd Not Logging" "$ADMIN_EMAIL"
     exit 1
 fi
@@ -61,6 +65,9 @@ if [ -z "$EVENTS_COUNT" ] || [ "$EVENTS_COUNT" = "" ]; then
 else
     EVENTS_YESTERDAY="$EVENTS_COUNT"
 fi
+
+# Log structured health metrics for Datadog
+logger -t auditd "HEALTH_CHECK: status=operational service_running=true rules_loaded=$RULES_COUNT log_files=$LOG_COUNT disk_usage_percent=$DISK_USAGE events_yesterday=$EVENTS_YESTERDAY"
 
 # Get recent audit entries for the report
 RECENT_ENTRIES=$(tail -25 "$AUDIT_LOG" | sed 's/^/  /')
@@ -89,7 +96,7 @@ This is a routine health check confirming that auditd
 is properly configured and operational for SOC 2 compliance.
 
 For detailed audit investigation, use: ausearch commands
-For daily security monitoring, see: Grafana Cloud dashboards
+For daily security monitoring, see: Datadog dashboards
 EOF
 
 # Send clean status report

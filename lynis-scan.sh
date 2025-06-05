@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Simple Lynis security scanner with Grafana Cloud integration
+# Lynis security scanner with Datadog integration
 # Focuses on security assessment without unnecessary complexity
 
 # Load configuration from SOC2 config files
@@ -13,10 +13,10 @@ DATE_STAMP=$(date +%Y%m%d)
 REPORT_FILE="$LOG_DIR/report-$DATE_STAMP.txt"
 LOG_FILE="$LOG_DIR/scan-$DATE_STAMP.log"
 
-# Grafana-friendly logging function
+# Datadog-friendly logging function
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
-    # Use 'lynis' tag so rsyslog routes to Grafana Cloud logs
+    # Use 'lynis' tag for consistent syslog routing to Datadog
     logger -t lynis "$1"
 }
 
@@ -50,7 +50,7 @@ TOTAL_ISSUES=$((WARNINGS + SUGGESTIONS + MANUAL_ITEMS))
 # Extract hardening index
 HARDENING_INDEX=$(grep "^hardening_index=" "$REPORT_FILE" 2>/dev/null | cut -d'=' -f2 || echo "Unknown")
 
-# Log structured metrics for Grafana
+# Log structured metrics for Datadog
 logger -t lynis "SECURITY_SCAN: warnings=$WARNINGS suggestions=$SUGGESTIONS manual=$MANUAL_ITEMS total=$TOTAL_ISSUES hardening_index=$HARDENING_INDEX"
 
 # Handle results - always email for audit trail
@@ -73,8 +73,10 @@ if [ "$WARNINGS" -gt 0 ]; then
             echo "(Showing first 10 of $WARNINGS warnings)"
         fi
         echo ""
-        echo "Full report attached below:"
-        echo "=========================="
+        echo "View detailed security trends and analysis in your Datadog dashboard."
+        echo ""
+        echo "Full report:"
+        echo "============"
         cat "$REPORT_FILE"
     } | mail -s "[SECURITY WARNING] Lynis Scan - $WARNINGS warnings - $(hostname)" "$ADMIN_EMAIL"
 
@@ -92,8 +94,10 @@ elif [ "$TOTAL_ISSUES" -gt 0 ]; then
         echo ""
         echo "No critical warnings found - system security posture is good."
         echo ""
-        echo "Full report attached below:"
-        echo "=========================="
+        echo "View historical security trends in your Datadog dashboard."
+        echo ""
+        echo "Full report:"
+        echo "============"
         cat "$REPORT_FILE"
     } | mail -s "[Lynis] Security Scan - $TOTAL_ISSUES suggestions - $(hostname)" "$ADMIN_EMAIL"
 
@@ -112,8 +116,10 @@ else
         echo "Excellent! No security issues found."
         echo "This is a routine security assessment confirmation."
         echo ""
-        echo "Full report attached below:"
-        echo "=========================="
+        echo "View security posture trends in your Datadog dashboard."
+        echo ""
+        echo "Full report:"
+        echo "============"
         cat "$REPORT_FILE"
     } | mail -s "[Lynis] Security Scan - Clean - $(hostname)" "$ADMIN_EMAIL"
 fi

@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# Simple AIDE file integrity checker with Grafana Cloud integration
-# Focuses on detecting critical system file changes without insane complexity
+# AIDE file integrity checker with Datadog integration
+# Focuses on detecting critical system file changes with clear alerting
 
 # Load configuration from SOC2 config files
 source /usr/local/share/soc2-scripts/config/common.conf
@@ -10,10 +10,10 @@ source /usr/local/share/soc2-scripts/config/aide-check.conf
 
 LOG_FILE="$REPORT_DIR/aide-check.log"
 
-# Grafana-friendly logging function
+# Datadog-friendly logging function
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
-    # Use 'aide' tag so rsyslog routes to Grafana Cloud logs
+    # Use 'aide' tag for consistent syslog routing to Datadog
     logger -t aide "$1"
 }
 
@@ -48,7 +48,7 @@ fi
 TOTAL_CHANGES=$(grep -c "^f[+\.-]" "$AIDE_RESULT" 2>/dev/null || echo "0")
 CRITICAL_CHANGES=$(grep -cE "^f[+\.-].*/etc/|^f[+\.-].*/boot/|^f[+\.-].*/usr/local/bin/" "$AIDE_RESULT" 2>/dev/null || echo "0")
 
-# Log structured metrics for Grafana
+# Log structured metrics for Datadog
 logger -t aide "INTEGRITY_CHECK: total_changes=$TOTAL_CHANGES critical_changes=$CRITICAL_CHANGES status=$AIDE_STATUS"
 
 # Handle results based on what we found
@@ -64,6 +64,8 @@ if [ "$CRITICAL_CHANGES" -gt 0 ]; then
             echo ""
             echo "(Showing first 20 of $CRITICAL_CHANGES critical changes)"
         fi
+        echo ""
+        echo "View detailed analysis and trends in your Datadog dashboard."
         echo ""
         echo "Full AIDE output:"
         cat "$AIDE_RESULT"
@@ -81,6 +83,8 @@ elif [ "$TOTAL_CHANGES" -gt 0 ]; then
             echo ""
             echo "(Showing first 20 of $TOTAL_CHANGES changes)"
         fi
+        echo ""
+        echo "View detailed analysis in your Datadog dashboard."
     } | mail -s "[AIDE] File Changes - $TOTAL_CHANGES changes - $(hostname)" "$ADMIN_EMAIL"
 
 elif [ "$AIDE_STATUS" = "error" ]; then
@@ -102,6 +106,7 @@ else
         echo "Database age: $(stat -c %Y /var/lib/aide/aide.db | xargs -I {} date -d @{} '+%Y-%m-%d')"
         echo ""
         echo "This is a routine integrity check confirmation."
+        echo "View historical trends in your Datadog dashboard."
     } | mail -s "[AIDE] Integrity Check - Clean - $(hostname)" "$ADMIN_EMAIL"
 fi
 
