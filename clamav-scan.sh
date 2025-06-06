@@ -62,6 +62,12 @@ log_metrics "$FILES_SCANNED" "$INFECTED_COUNT" "$SCAN_STATUS"
 # Handle results - always send email for audit trail
 if [ "$INFECTED_COUNT" -gt 0 ]; then
     log_message "ALERT: $INFECTED_COUNT infected files found"
+
+    # Manually log each infection to syslog for security monitoring
+    grep "FOUND" "$SCAN_RESULT" | while read -r line; do
+        logger -t clamav-security "VIRUS_DETECTED: $line"
+    done
+
     {
         echo "ClamAV scan found $INFECTED_COUNT infected files on $(hostname)"
         echo "Files scanned: $FILES_SCANNED"
@@ -86,7 +92,6 @@ else
         echo "- Database version: $(grep "Known viruses:" "$SCAN_RESULT" | cut -d: -f2- || echo "Unknown")"
         echo ""
         echo "This is a routine security scan confirmation."
-        echo "View detailed metrics and trends in your Datadog dashboard."
     } | mail -s "[ClamAV] Daily Scan - Clean - $FILES_SCANNED files - $(hostname)" "$ADMIN_EMAIL"
 fi
 
