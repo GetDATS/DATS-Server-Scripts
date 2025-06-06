@@ -6,6 +6,7 @@ set -euo pipefail
 
 # Load configuration from SOC2 config files
 source /usr/local/share/soc2-scripts/config/common.conf
+source /usr/local/share/soc2-scripts/config/credentials.conf
 source /usr/local/share/soc2-scripts/config/borg-backup.conf
 source /usr/local/share/soc2-scripts/config/aws-sync.conf
 

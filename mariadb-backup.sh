@@ -6,6 +6,7 @@ set -euo pipefail
 
 # Load configuration from SOC2 config files
 source /usr/local/share/soc2-scripts/config/common.conf
+source /usr/local/share/soc2-scripts/config/credentials.conf
 source /usr/local/share/soc2-scripts/config/mariadb-backup.conf
 
 LOG_FILE="/var/log/backups/mariadb-backup.log"
@@ -39,7 +40,7 @@ log_message "Creating backup: $BACKUP_PATH"
 
 if mariadb-backup --backup \
     --user="$MARIADB_USER" \
-    --password="$MARIADB_PASSWORD" \
+    --password="$MARIADB_ADMIN_PASSWORD" \
     --target-dir="$BACKUP_PATH" \
     --compress \
     --compress-threads=2 2>&1 | tee -a "$LOG_FILE"; then
