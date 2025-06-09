@@ -21,17 +21,24 @@ AVAILABLE_FOR_APACHE=$((TOTAL_RAM_GB * 25 / 100))
 # Memory per thread (Apache threads are lightweight compared to PHP processes)
 MEMORY_PER_THREAD=8  # MB - Apache threads use much less memory than PHP-FPM processes
 
-# Calculate MaxRequestWorkers (total concurrent connections)
-MAX_REQUEST_WORKERS=$((AVAILABLE_FOR_APACHE * 1024 / MEMORY_PER_THREAD))
-
-# Apply sensible caps - even massive servers don't need unlimited connections
-[ $MAX_REQUEST_WORKERS -gt 1000 ] && MAX_REQUEST_WORKERS=1000  # Cap at 1000 for sanity
-[ $MAX_REQUEST_WORKERS -lt 50 ] && MAX_REQUEST_WORKERS=50      # Minimum of 50
-
 # Calculate ThreadsPerChild based on CPU cores (but not too high)
 THREADS_PER_CHILD=$((CPU_CORES * 8))  # 8 threads per core is reasonable
 [ $THREADS_PER_CHILD -gt 64 ] && THREADS_PER_CHILD=64    # Cap at 64
 [ $THREADS_PER_CHILD -lt 16 ] && THREADS_PER_CHILD=16    # Minimum of 16
+
+# Calculate MaxRequestWorkers (total concurrent connections)
+RAW_MAX_REQUEST_WORKERS=$((AVAILABLE_FOR_APACHE * 1024 / MEMORY_PER_THREAD))
+
+# Apply sensible caps - even massive servers don't need unlimited connections
+[ $RAW_MAX_REQUEST_WORKERS -gt 1000 ] && RAW_MAX_REQUEST_WORKERS=1000  # Cap at 1000 for sanity
+[ $RAW_MAX_REQUEST_WORKERS -lt 50 ] && RAW_MAX_REQUEST_WORKERS=50      # Minimum of 50
+
+# CRITICAL: Ensure MaxRequestWorkers is a multiple of ThreadsPerChild
+# Apache requires this or it will round down and warn
+MAX_REQUEST_WORKERS=$(( (RAW_MAX_REQUEST_WORKERS / THREADS_PER_CHILD) * THREADS_PER_CHILD ))
+
+# If rounding resulted in 0, use at least one multiple
+[ $MAX_REQUEST_WORKERS -lt $THREADS_PER_CHILD ] && MAX_REQUEST_WORKERS=$THREADS_PER_CHILD
 
 # Calculate StartServers based on MaxRequestWorkers and ThreadsPerChild
 START_SERVERS=$((MAX_REQUEST_WORKERS / THREADS_PER_CHILD / 4))  # Start with 25% capacity
