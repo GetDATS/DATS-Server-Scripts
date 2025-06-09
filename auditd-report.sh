@@ -59,6 +59,10 @@ fi
 
 # Check 2: Are audit rules loaded?
 RULES_COUNT=$(auditctl -l | wc -l)
+# Clean the variable with bulletproof number extraction
+RULES_COUNT=$(echo "$RULES_COUNT" | head -1 | tr -d '\n\r\t ' || echo "0")
+[[ "$RULES_COUNT" =~ ^[0-9]+$ ]] || RULES_COUNT="0"
+
 if [ "$RULES_COUNT" -ge 10 ]; then
     RULES_LOADED="true"
     log_message "Auditd rules loaded: adequate coverage"
@@ -113,7 +117,14 @@ log_message "Audit log file is healthy"
 
 # Check 4: Log rotation working?
 LOG_COUNT=$(ls -1 /var/log/audit/ | wc -l)
+# Clean the variable with bulletproof number extraction
+LOG_COUNT=$(echo "$LOG_COUNT" | head -1 | tr -d '\n\r\t ' || echo "0")
+[[ "$LOG_COUNT" =~ ^[0-9]+$ ]] || LOG_COUNT="0"
+
 DISK_USAGE=$(df /var/log/audit | tail -1 | awk '{print $5}' | sed 's/%//')
+# Clean the variable with bulletproof number extraction
+DISK_USAGE=$(echo "$DISK_USAGE" | head -1 | tr -d '\n\r\t ' || echo "0")
+[[ "$DISK_USAGE" =~ ^[0-9]+$ ]] || DISK_USAGE="0"
 
 if [ "$LOG_COUNT" -ge 2 ] && [ "$DISK_USAGE" -lt 90 ]; then
     LOG_ROTATION_HEALTHY="true"
@@ -142,6 +153,9 @@ fi
 # Check 5: Recent activity verification (just confirm audit events are being generated)
 YESTERDAY=$(date -d yesterday '+%m/%d/%Y')
 EVENTS_COUNT=$(ausearch --start "$YESTERDAY 00:00:00" --end "$YESTERDAY 23:59:59" 2>/dev/null | grep -c "^----" 2>/dev/null || echo "0")
+# Clean the variable with bulletproof number extraction
+EVENTS_COUNT=$(echo "$EVENTS_COUNT" | head -1 | tr -d '\n\r\t ' || echo "0")
+[[ "$EVENTS_COUNT" =~ ^[0-9]+$ ]] || EVENTS_COUNT="0"
 
 # Determine activity level for reporting
 if [ "$EVENTS_COUNT" -gt 1000 ]; then
