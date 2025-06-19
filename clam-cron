@@ -1,0 +1,2 @@
+# ClamAV daily scan - 10:00 AM UTC (2:00 AM PST / 3:00 AM PDT)
+0 10 * * * root /usr/local/share/soc2-scripts/clamav-scan.sh >/dev/null 2>&1

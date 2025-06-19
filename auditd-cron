@@ -1,0 +1,2 @@
+# Auditd health check daily scan - 1:00 PM UTC (5:00 AM PST / 6:00 AM PDT)
+0 13 * * * root /usr/local/share/soc2-scripts/auditd-report.sh >/dev/null 2>&1

@@ -1,0 +1,2 @@
+# Lynis security scan - Mondays 12:00 PM UTC (4:00 AM PST / 5:00 AM PDT)
+0 12 * * 1 root /usr/local/share/soc2-scripts/lynis-scan.sh >/dev/null 2>&1

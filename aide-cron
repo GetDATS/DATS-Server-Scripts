@@ -1,0 +1,2 @@
+# AIDE integrity check - 11:00 AM UTC (3:00 AM PST / 4:00 AM PDT)
+0 11 * * * root /usr/local/share/soc2-scripts/aide-check.sh >/dev/null 2>&1
