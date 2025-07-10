@@ -55,12 +55,10 @@ S3_PATH="s3://$AWS_BACKUP_BUCKET/mariadb-full/$(hostname)/$(date +%Y/%m)/backup-
 
 log_message "Starting MariaDB backup to local disk"
 
-# Stream backup to local file first
+# Stream backup to local file first (uncompressed for better pbzip2 compression)
 if mariadb-backup --backup \
     --defaults-file=/root/.backup.cnf \
-    --stream=mbstream \
-    --compress \
-    --compress-threads=2 > "$LOCAL_PATH" 2>/dev/null; then
+    --stream=mbstream > "$LOCAL_PATH" 2>/dev/null; then
 
     BACKUP_STREAM_STATUS="success"
     log_message "Backup stream completed successfully"
@@ -83,12 +81,11 @@ if [ "$BACKUP_STREAM_STATUS" = "success" ]; then
     log_message "Compressing backup with pbzip2"
 
     # Use nice and ionice to minimize production impact
-    if nice -n 19 ionice -c2 -n7 pbzip2 -k "$LOCAL_PATH"; then
+    if nice -n 19 ionice -c2 -n7 pbzip2 "$LOCAL_PATH"; then
         LOCAL_RESULT="success"
         log_message "Compression completed successfully"
 
-        # Remove uncompressed file to save space
-        rm -f "$LOCAL_PATH"
+        # Note: pbzip2 replaces the original file with .bz2 version
 
         # Upload to S3
         log_message "Uploading compressed backup to S3"
