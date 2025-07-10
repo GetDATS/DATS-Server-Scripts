@@ -49,68 +49,67 @@ log_message "Cleaning local backups older than $LOCAL_RETAIN_DAYS days"
 find "$LOCAL_BACKUP_DIR" -name "mariadb-*.bz2" -mtime +$LOCAL_RETAIN_DAYS -delete 2>/dev/null || true
 
 # Define paths
-S3_PATH="s3://$AWS_BACKUP_BUCKET/mariadb-full/$(hostname)/$(date +%Y/%m)/backup-$DATE_STAMP.mbstream"
-LOCAL_PATH="$LOCAL_BACKUP_DIR/mariadb-$DATE_STAMP.mbstream.bz2"
-TEMP_FIFO="/tmp/backup-fifo-$$"
+LOCAL_PATH="$LOCAL_BACKUP_DIR/mariadb-$DATE_STAMP.mbstream"
+COMPRESSED_PATH="${LOCAL_PATH}.bz2"
+S3_PATH="s3://$AWS_BACKUP_BUCKET/mariadb-full/$(hostname)/$(date +%Y/%m)/backup-$DATE_STAMP.mbstream.bz2"
 
-# Create named pipe for splitting the stream
-mkfifo "$TEMP_FIFO"
+log_message "Starting MariaDB backup to local disk"
 
-# Clean up function to ensure FIFO is removed
-cleanup() {
-    rm -f "$TEMP_FIFO"
-}
-trap cleanup EXIT
-
-log_message "Starting parallel backup to local disk and S3"
-
-# Start the S3 upload in background (reading from FIFO)
-aws s3 cp "$TEMP_FIFO" "$S3_PATH" --expected-size 1073741824 &
-S3_PID=$!
-
-# Start the local compression in background (reading from FIFO)
-# Using nice and ionice to minimize production impact
-nice -n 19 ionice -c2 -n7 pbzip2 -c -k < "$TEMP_FIFO" > "$LOCAL_PATH" &
-LOCAL_PID=$!
-
-# Stream backup to the FIFO (which feeds both processes)
+# Stream backup to local file first
 if mariadb-backup --backup \
     --defaults-file=/root/.backup.cnf \
     --stream=mbstream \
     --compress \
-    --compress-threads=2 2>/dev/null | tee "$TEMP_FIFO" > /dev/null; then
+    --compress-threads=2 > "$LOCAL_PATH" 2>/dev/null; then
 
     BACKUP_STREAM_STATUS="success"
-    log_message "Backup stream completed"
+    log_message "Backup stream completed successfully"
+
+    # Get uncompressed size for reporting
+    UNCOMPRESSED_SIZE=$(stat -c%s "$LOCAL_PATH" 2>/dev/null || echo "0")
+    log_message "Uncompressed backup size: $(numfmt --to=iec-i --suffix=B $UNCOMPRESSED_SIZE)"
+
 else
     BACKUP_STREAM_STATUS="failed"
     log_message "ERROR: Backup stream failed"
+    rm -f "$LOCAL_PATH"
 fi
 
-# Close the FIFO
-exec 3>&-
+# Compress the backup locally
+LOCAL_RESULT="failed"
+S3_RESULT="failed"
 
-# Wait for both background processes to complete
-S3_RESULT="success"
-LOCAL_RESULT="success"
+if [ "$BACKUP_STREAM_STATUS" = "success" ]; then
+    log_message "Compressing backup with pbzip2"
 
-if ! wait $S3_PID; then
-    S3_RESULT="failed"
-    log_message "WARNING: S3 upload failed"
-fi
+    # Use nice and ionice to minimize production impact
+    if nice -n 19 ionice -c2 -n7 pbzip2 -k "$LOCAL_PATH"; then
+        LOCAL_RESULT="success"
+        log_message "Compression completed successfully"
 
-if ! wait $LOCAL_PID; then
-    LOCAL_RESULT="failed"
-    log_message "WARNING: Local compression failed"
+        # Remove uncompressed file to save space
+        rm -f "$LOCAL_PATH"
+
+        # Upload to S3
+        log_message "Uploading compressed backup to S3"
+        if aws s3 cp "$COMPRESSED_PATH" "$S3_PATH"; then
+            S3_RESULT="success"
+            log_message "S3 upload completed successfully"
+        else
+            S3_RESULT="failed"
+            log_message "WARNING: S3 upload failed - local backup retained"
+        fi
+    else
+        LOCAL_RESULT="failed"
+        log_message "ERROR: Compression failed"
+        rm -f "$LOCAL_PATH"
+    fi
 fi
 
 # Determine overall status
 if [ "$BACKUP_STREAM_STATUS" = "failed" ]; then
     BACKUP_STATUS="$STATUS_ERROR"
     LOCAL_COPY="failed"
-
-    # Clean up partial files
-    rm -f "$LOCAL_PATH"
 
     logger -t soc2-security "BACKUP_FAILURE: service=mariadb severity=critical"
     echo "MariaDB full backup failed on $(hostname)" | \
@@ -143,22 +142,16 @@ BACKUP_END=$(date +%s)
 BACKUP_DURATION=$((BACKUP_END - BACKUP_START))
 
 # Get backup sizes
-if [ -f "$LOCAL_PATH" ]; then
-    LOCAL_SIZE=$(stat -c%s "$LOCAL_PATH" 2>/dev/null || echo "0")
+if [ -f "$COMPRESSED_PATH" ]; then
+    LOCAL_SIZE=$(stat -c%s "$COMPRESSED_PATH" 2>/dev/null || echo "0")
     LOCAL_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B $LOCAL_SIZE 2>/dev/null || echo "$LOCAL_SIZE bytes")
 else
     LOCAL_SIZE=0
     LOCAL_SIZE_HUMAN="N/A"
 fi
 
-if [ "$S3_RESULT" = "success" ]; then
-    S3_SIZE=$(aws s3api head-object --bucket "$AWS_BACKUP_BUCKET" --key "${S3_PATH#s3://$AWS_BACKUP_BUCKET/}" --query ContentLength --output text 2>/dev/null || echo "0")
-else
-    S3_SIZE=0
-fi
-
-# Use the larger size for metrics (they should be similar)
-BACKUP_SIZE=$((LOCAL_SIZE > S3_SIZE ? LOCAL_SIZE : S3_SIZE))
+# Use local size for metrics since S3 upload might have failed
+BACKUP_SIZE=$LOCAL_SIZE
 
 # Log structured metrics
 log_metrics "$BACKUP_SIZE" "$BACKUP_STATUS" "$BACKUP_DURATION" "$LOCAL_COPY"
@@ -180,7 +173,7 @@ LOCAL_BACKUP_TOTAL=$(du -sh "$LOCAL_BACKUP_DIR" 2>/dev/null | cut -f1 || echo "U
     if [ "$S3_RESULT" = "success" ]; then
         echo "✓ S3 Upload: Success"
         echo "  Location: $S3_PATH"
-        echo "  Size: $(numfmt --to=iec-i --suffix=B $S3_SIZE 2>/dev/null || echo "$S3_SIZE bytes")"
+        echo "  Size: $LOCAL_SIZE_HUMAN"
     else
         echo "✗ S3 Upload: FAILED"
         echo "  Check network connectivity and AWS credentials"
@@ -188,7 +181,7 @@ LOCAL_BACKUP_TOTAL=$(du -sh "$LOCAL_BACKUP_DIR" 2>/dev/null | cut -f1 || echo "U
     echo ""
     if [ "$LOCAL_RESULT" = "success" ]; then
         echo "✓ Local Backup: Success"
-        echo "  Location: $LOCAL_PATH"
+        echo "  Location: $COMPRESSED_PATH"
         echo "  Size: $LOCAL_SIZE_HUMAN"
         echo "  Compression: pbzip2 (parallel)"
     else
@@ -204,18 +197,19 @@ LOCAL_BACKUP_TOTAL=$(du -sh "$LOCAL_BACKUP_DIR" 2>/dev/null | cut -f1 || echo "U
     echo "Recovery Instructions:"
     if [ "$LOCAL_RESULT" = "success" ]; then
         echo "From local backup (fastest):"
-        echo "1. Decompress: pbzip2 -d -k $LOCAL_PATH"
-        echo "2. Extract: mbstream -x < ${LOCAL_PATH%.bz2}"
+        echo "1. Decompress: pbzip2 -d -k $COMPRESSED_PATH"
+        echo "2. Extract: mbstream -x < ${COMPRESSED_PATH%.bz2}"
         echo "3. Prepare: mariadb-backup --prepare --target-dir=."
         echo "4. Restore: mariadb-backup --copy-back --target-dir=."
     fi
     if [ "$S3_RESULT" = "success" ]; then
         echo ""
         echo "From S3 backup:"
-        echo "1. Download: aws s3 cp $S3_PATH backup.mbstream"
-        echo "2. Extract: mbstream -x < backup.mbstream"
-        echo "3. Prepare: mariadb-backup --prepare --target-dir=."
-        echo "4. Restore: mariadb-backup --copy-back --target-dir=."
+        echo "1. Download: aws s3 cp $S3_PATH backup.mbstream.bz2"
+        echo "2. Decompress: pbzip2 -d backup.mbstream.bz2"
+        echo "3. Extract: mbstream -x < backup.mbstream"
+        echo "4. Prepare: mariadb-backup --prepare --target-dir=."
+        echo "5. Restore: mariadb-backup --copy-back --target-dir=."
     fi
 
     if [ "$S3_RESULT" = "failed" ] && [ "$LOCAL_RESULT" = "success" ]; then
