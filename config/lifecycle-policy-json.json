@@ -1,0 +1,88 @@
+{
+    "Rules": [
+        {
+            "Id": "MariaDBBinaryLogs",
+            "Status": "Enabled",
+            "Filter": {
+                "Prefix": "mariadb-binlog/"
+            },
+            "Transitions": [
+                {
+                    "Days": 1,
+                    "StorageClass": "STANDARD_IA"
+                }
+            ],
+            "Expiration": {
+                "Days": 7
+            }
+        },
+        {
+            "Id": "MariaDBFullBackups",
+            "Status": "Enabled",
+            "Filter": {
+                "Prefix": "mariadb-full/"
+            },
+            "Transitions": [
+                {
+                    "Days": 7,
+                    "StorageClass": "STANDARD_IA"
+                },
+                {
+                    "Days": 30,
+                    "StorageClass": "GLACIER_IR"
+                },
+                {
+                    "Days": 60,
+                    "StorageClass": "DEEP_ARCHIVE"
+                }
+            ],
+            "Expiration": {
+                "Days": 90
+            }
+        },
+        {
+            "Id": "HomeBackups",
+            "Status": "Enabled",
+            "Filter": {
+                "Prefix": "home/"
+            },
+            "Transitions": [
+                {
+                    "Days": 7,
+                    "StorageClass": "STANDARD_IA"
+                },
+                {
+                    "Days": 30,
+                    "StorageClass": "GLACIER_IR"
+                },
+                {
+                    "Days": 60,
+                    "StorageClass": "DEEP_ARCHIVE"
+                }
+            ],
+            "Expiration": {
+                "Days": 90
+            }
+        },
+        {
+            "Id": "LogArchives",
+            "Status": "Enabled",
+            "Filter": {
+                "Prefix": "logs/"
+            },
+            "Transitions": [
+                {
+                    "Days": 0,
+                    "StorageClass": "GLACIER_IR"
+                },
+                {
+                    "Days": 90,
+                    "StorageClass": "DEEP_ARCHIVE"
+                }
+            ],
+            "Expiration": {
+                "Days": 365
+            }
+        }
+    ]
+}
