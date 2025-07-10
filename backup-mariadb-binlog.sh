@@ -55,6 +55,26 @@ log_message "Current binary log: $CURRENT_BINLOG"
 # Create state file if it doesn't exist
 touch "$STATE_FILE"
 
+# Weekly state file cleanup - recreate with only recent entries
+if [ "$(date +%u)" = "7" ]; then  # Sunday
+    log_message "Performing weekly state file cleanup"
+
+    # Get list of current binary logs from the last 7 days
+    temp_state=$(mktemp)
+    find $BINLOG_DIR -name "mysql-bin.[0-9]*" -mtime -7 -type f 2>/dev/null | while read -r binlog_path; do
+        basename "$binlog_path" >> "$temp_state"
+    done
+
+    # Replace the state file with cleaned version
+    if [ -s "$temp_state" ]; then
+        mv "$temp_state" "$STATE_FILE"
+        log_message "State file cleaned - $(wc -l < "$STATE_FILE") entries retained"
+    else
+        rm -f "$temp_state"
+        log_message "State file cleanup skipped - no recent entries found"
+    fi
+fi
+
 # Process completed binary logs only (not the current one being written)
 for binlog_path in $(ls $BINLOG_DIR/mysql-bin.[0-9]* 2>/dev/null | grep -v '.index' || true); do
     BINLOG_NAME=$(basename "$binlog_path")
