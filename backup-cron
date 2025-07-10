@@ -10,5 +10,8 @@
 # Log archive backup - 3:30 AM UTC daily (7:30 PM PST / 8:30 PM PDT)
 30 3 * * * root /usr/local/bin/backup-logs.sh >/dev/null 2>&1
 
+# Daily summary report - 8:00 AM UTC daily (12:00 AM PST / 1:00 AM PDT)
+0 8 * * * root /usr/local/bin/backup-daily-summary.sh >/dev/null 2>&1
+
 # Backup cleanup - Sundays 4:00 AM UTC (8:00 PM PST Saturday / 9:00 PM PDT Saturday)
 0 4 * * 0 root /usr/local/bin/backup-cleanup.sh >/dev/null 2>&1
