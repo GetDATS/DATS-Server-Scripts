@@ -85,6 +85,23 @@ else
     s3_status="DISCONNECTED"
 fi
 
+# Calculate uptime percentage (successful runs / expected runs)
+total_expected=99  # 96 binlogs + 3 daily backups
+total_success=$(grep -c "$YESTERDAY.*OPERATION_COMPLETE.*status=$STATUS_SUCCESS" $LOG_DIR/*.log 2>/dev/null || echo "0")
+uptime_pct=$((total_success * 100 / total_expected))
+
+# Count recent errors
+recent_errors=$(grep "$YESTERDAY.*ERROR\|$TODAY.*ERROR" $LOG_DIR/*.log 2>/dev/null | wc -l || echo "0")
+
+# Determine overall status for subject line
+if [ "$recent_errors" -gt 0 ]; then
+    STATUS_INDICATOR="❌ ERRORS"
+elif [ "$uptime_pct" -lt 95 ]; then
+    STATUS_INDICATOR="⚠️ WARNING"
+else
+    STATUS_INDICATOR="✅ OK"
+fi
+
 # Generate summary report
 {
     echo "Daily Backup Summary Report - $(hostname)"
@@ -111,12 +128,6 @@ fi
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo "KEY METRICS:"
-
-    # Calculate uptime percentage (successful runs / expected runs)
-    local total_expected=99  # 96 binlogs + 3 daily backups
-    local total_success=$(grep -c "$YESTERDAY.*OPERATION_COMPLETE.*status=$STATUS_SUCCESS" $LOG_DIR/*.log 2>/dev/null || echo "0")
-    local uptime_pct=$((total_success * 100 / total_expected))
-
     echo "  Backup Success Rate: ${uptime_pct}%"
     echo "  Recovery Point Objective: 15 minutes (binary logs)"
     echo "  Recovery Time Objective: <1 hour (automated)"
@@ -124,8 +135,6 @@ fi
 
     # Recent alerts section
     echo "RECENT ALERTS (last 24 hours):"
-    local recent_errors=$(grep "$YESTERDAY.*ERROR\|$TODAY.*ERROR" $LOG_DIR/*.log 2>/dev/null | wc -l || echo "0")
-
     if [ "$recent_errors" -eq 0 ]; then
         echo "  ✓ No alerts - all systems operational"
     else
@@ -155,7 +164,7 @@ fi
     echo "This is an automated daily summary. Critical errors"
     echo "still generate immediate notifications."
 
-} | mail -s "[Backup] Daily Summary - $(hostname) - ${uptime_pct}% Success" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+} | mail -s "[Backup] Daily Summary - $(hostname) - $STATUS_INDICATOR" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
 
 log_message "Daily backup summary sent"
 
