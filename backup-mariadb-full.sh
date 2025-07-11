@@ -1,220 +1,294 @@
 #!/bin/bash
 set -euo pipefail
 
-# MariaDB full backup with local retention and S3 upload
-# Keeps compressed local copies as insurance against upload failures
+# MariaDB full backup - production-ready with comprehensive safety checks
+# Direct backup to directory, compress, encrypt, upload, verify, retain, notify
 
-# Load configuration from SOC2 config files
+# Load configuration
 source /usr/local/share/soc2-scripts/config/common.conf
 source /usr/local/share/soc2-scripts/config/credentials.conf
 source /usr/local/share/soc2-scripts/config/backup.conf
 
-LOG_FILE="/var/log/backups/mariadb-full.log"
+# Use log location from config
+LOG_FILE="$MARIADB_FULL_LOG"
 DATE_STAMP=$(date +%Y%m%d-%H%M%S)
-LOCAL_BACKUP_DIR="/backups/mariadb-local"
-LOCAL_RETAIN_DAYS=7  # Keep one week locally
+DAY_OF_WEEK=$(date +%u)  # 1=Monday, 7=Sunday
 
-# Structured logging function for monitoring integration
+# Simple logging function
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
     logger -t soc2-backup "$1"
 }
 
-# Log structured metrics for monitoring
-log_metrics() {
-    local backup_size=$1
-    local status=$2
-    local operation_duration=${3:-0}
-    local local_copy=$4
+# Pre-flight checks - catch problems before they cascade
+preflight_checks() {
+    local checks_passed=true
 
-    logger -t soc2-backup "OPERATION_COMPLETE: service=backup operation=mariadb_full size_bytes=$backup_size status=$status duration_seconds=$operation_duration local_copy=$local_copy"
+    # Check 1: Is MariaDB actually running?
+    log_message "Pre-flight: Checking MariaDB service"
+    if ! systemctl is-active --quiet mariadb; then
+        log_message "ERROR: MariaDB service is not running"
+        echo "MariaDB service is down on $(hostname) - no backup possible" | mail -s "[BACKUP ERROR] MariaDB Service Down" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+        exit 1
+    fi
+
+    # Check 2: Can we connect to MariaDB?
+    log_message "Pre-flight: Testing MariaDB connectivity"
+    if ! mysql --defaults-file="$MARIADB_DEFAULTS_FILE" -e "SELECT 1" >/dev/null 2>&1; then
+        log_message "ERROR: Cannot connect to MariaDB"
+        echo "Cannot connect to MariaDB on $(hostname) - check credentials" | mail -s "[BACKUP ERROR] MariaDB Connection Failed" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+        exit 1
+    fi
+
+    # Check 3: Do we have enough disk space?
+    log_message "Pre-flight: Checking disk space"
+    DB_SIZE=$(mysql --defaults-file="$MARIADB_DEFAULTS_FILE" -e "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 0) AS 'DB Size in MB' FROM information_schema.tables;" -s -N 2>/dev/null || echo "0")
+    REQUIRED_SPACE_MB=$((DB_SIZE * 3))  # Need space for backup + compressed + overhead
+    AVAILABLE_SPACE_MB=$(df -BM "$BACKUP_BASE_DIR" | tail -1 | awk '{print $4}' | sed 's/M//')
+
+    if [ "$AVAILABLE_SPACE_MB" -lt "$REQUIRED_SPACE_MB" ]; then
+        log_message "ERROR: Insufficient disk space (need ${REQUIRED_SPACE_MB}MB, have ${AVAILABLE_SPACE_MB}MB)"
+        echo "Insufficient disk space for backup on $(hostname) - need ${REQUIRED_SPACE_MB}MB, have ${AVAILABLE_SPACE_MB}MB" | mail -s "[BACKUP ERROR] Disk Space Critical" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+        exit 1
+    fi
+    log_message "Pre-flight: Disk space OK (${AVAILABLE_SPACE_MB}MB available, ${REQUIRED_SPACE_MB}MB needed)"
+
+    # Check 4: Are config files readable?
+    log_message "Pre-flight: Checking configuration files"
+    if [ ! -r "$MARIADB_DEFAULTS_FILE" ]; then
+        log_message "ERROR: Cannot read MariaDB defaults file: $MARIADB_DEFAULTS_FILE"
+        checks_passed=false
+    fi
+
+    # Check 5: If we have an encryption key, can we use it?
+    if [ -f "$BACKUP_ENCRYPTION_KEY" ]; then
+        log_message "Pre-flight: Testing encryption key"
+        if ! echo "test" | openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:"$BACKUP_ENCRYPTION_KEY" >/dev/null 2>&1; then
+            log_message "ERROR: Encryption key exists but appears invalid"
+            echo "Encryption key is corrupted on $(hostname) - backups will not be encrypted" | mail -s "[BACKUP WARNING] Encryption Key Invalid" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+            # Don't exit - we can still do unencrypted backups
+        fi
+    fi
+
+    # Check 6: Can we write to backup directory?
+    log_message "Pre-flight: Checking backup directory permissions"
+    if ! touch "$BACKUP_BASE_DIR/.write_test" 2>/dev/null; then
+        log_message "ERROR: Cannot write to backup directory: $BACKUP_BASE_DIR"
+        checks_passed=false
+    else
+        rm -f "$BACKUP_BASE_DIR/.write_test"
+    fi
+
+    if [ "$checks_passed" = false ]; then
+        log_message "ERROR: Pre-flight checks failed"
+        exit 1
+    fi
+
+    log_message "Pre-flight: All checks passed"
 }
 
-log_message "Starting MariaDB full backup"
+log_message "Starting MariaDB full backup - $DATE_STAMP"
 BACKUP_START=$(date +%s)
 
-# Create local backup directory if it doesn't exist
-mkdir -p "$LOCAL_BACKUP_DIR"
+# Create backup directories
+mkdir -p "$BACKUP_BASE_DIR" "$BACKUP_LOG_DIR"
 
-# Check MariaDB is running
-if ! systemctl is-active --quiet mariadb; then
-    log_message "ERROR: MariaDB service not running"
-    logger -t soc2-backup "OPERATION_COMPLETE: service=backup operation=mariadb_full status=$STATUS_ERROR error=service_down"
-    echo "MariaDB backup failed - service not running on $(hostname)" | mail -s "[BACKUP ERROR] MariaDB Service Down" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+# Run pre-flight checks before we commit to anything
+preflight_checks
+
+# Step 1: Create backup in a directory (not streamed)
+BACKUP_DIR="$BACKUP_BASE_DIR/backup-$DATE_STAMP"
+log_message "Creating backup in: $BACKUP_DIR"
+
+if mariadb-backup --backup --defaults-file="$MARIADB_DEFAULTS_FILE" --target-dir="$BACKUP_DIR" 2>&1 | tee -a "$LOG_FILE"; then
+    log_message "Backup created successfully"
+else
+    log_message "ERROR: Backup creation failed"
+    # Clean up partial backup if it exists
+    [ -d "$BACKUP_DIR" ] && rm -rf "$BACKUP_DIR"
+    echo "MariaDB backup failed on $(hostname)" | mail -s "[BACKUP ERROR] MariaDB Full Backup Failed" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
     exit 1
 fi
 
-# Clean up old local backups first to ensure we have space
-log_message "Cleaning local backups older than $LOCAL_RETAIN_DAYS days"
-find "$LOCAL_BACKUP_DIR" -name "mariadb-*.bz2" -mtime +$LOCAL_RETAIN_DAYS -delete 2>/dev/null || true
+# Step 1.5: Verify backup integrity before we waste time compressing garbage
+log_message "Verifying backup integrity"
+VERIFY_DIR="$BACKUP_BASE_DIR/verify-$DATE_STAMP"
+cp -r "$BACKUP_DIR" "$VERIFY_DIR"
 
-# Define paths
-LOCAL_PATH="$LOCAL_BACKUP_DIR/mariadb-$DATE_STAMP.mbstream"
-COMPRESSED_PATH="${LOCAL_PATH}.bz2"
-S3_PATH="s3://$AWS_BACKUP_BUCKET/mariadb-full/$(hostname)/$(date +%Y/%m)/backup-$DATE_STAMP.mbstream.bz2"
-
-log_message "Starting MariaDB backup to local disk"
-
-# Stream backup to local file first (uncompressed for better pbzip2 compression)
-if mariadb-backup --backup \
-    --defaults-file=/root/.backup.cnf \
-    --stream=mbstream > "$LOCAL_PATH" 2>/dev/null; then
-
-    BACKUP_STREAM_STATUS="success"
-    log_message "Backup stream completed successfully"
-
-    # Get uncompressed size for reporting
-    UNCOMPRESSED_SIZE=$(stat -c%s "$LOCAL_PATH" 2>/dev/null || echo "0")
-    log_message "Uncompressed backup size: $(numfmt --to=iec-i --suffix=B $UNCOMPRESSED_SIZE)"
-
+if mariadb-backup --prepare --target-dir="$VERIFY_DIR" >/dev/null 2>&1; then
+    log_message "Backup integrity verified"
+    rm -rf "$VERIFY_DIR"
 else
-    BACKUP_STREAM_STATUS="failed"
-    log_message "ERROR: Backup stream failed"
-    rm -f "$LOCAL_PATH"
+    log_message "ERROR: Backup failed integrity check - data may be corrupted"
+    rm -rf "$BACKUP_DIR" "$VERIFY_DIR"
+    echo "MariaDB backup failed integrity check on $(hostname) - backup data corrupted" | mail -s "[BACKUP ERROR] Backup Integrity Failed" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+    exit 1
 fi
 
-# Compress the backup locally
-LOCAL_RESULT="failed"
-S3_RESULT="failed"
+# Step 2: Compress the backup directory
+COMPRESSED_FILE="$BACKUP_BASE_DIR/mariadb-$DATE_STAMP.tar.bz2"
+log_message "Compressing backup to: $COMPRESSED_FILE"
 
-if [ "$BACKUP_STREAM_STATUS" = "success" ]; then
-    log_message "Compressing backup with pbzip2"
+if tar -cjf "$COMPRESSED_FILE" -C "$BACKUP_BASE_DIR" "backup-$DATE_STAMP"; then
+    log_message "Compression completed"
+    # Remove uncompressed directory to save space
+    rm -rf "$BACKUP_DIR"
+else
+    log_message "ERROR: Compression failed"
+    rm -rf "$BACKUP_DIR"
+    exit 1
+fi
 
-    # Use nice and ionice to minimize production impact
-    if nice -n 19 ionice -c2 -n7 pbzip2 "$LOCAL_PATH"; then
-        LOCAL_RESULT="success"
-        log_message "Compression completed successfully"
+# Get compressed size for reporting
+BACKUP_SIZE=$(stat -c%s "$COMPRESSED_FILE" 2>/dev/null || echo "0")
+BACKUP_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B $BACKUP_SIZE 2>/dev/null || echo "$BACKUP_SIZE bytes")
 
-        # Note: pbzip2 replaces the original file with .bz2 version
+# Step 3: Encrypt the backup (if key exists and is valid)
+UPLOAD_FILE="$COMPRESSED_FILE"
+S3_FILENAME="mariadb-$DATE_STAMP.tar.bz2"
+ENCRYPTION_USED="No"
 
-        # Upload to S3
-        log_message "Uploading compressed backup to S3"
-        if aws s3 cp "$COMPRESSED_PATH" "$S3_PATH"; then
-            S3_RESULT="success"
-            log_message "S3 upload completed successfully"
+if [ -f "$BACKUP_ENCRYPTION_KEY" ]; then
+    ENCRYPTED_FILE="${COMPRESSED_FILE}.enc"
+    log_message "Encrypting backup"
+
+    if openssl enc -aes-256-cbc -salt -pbkdf2 -in "$COMPRESSED_FILE" -out "$ENCRYPTED_FILE" -pass file:"$BACKUP_ENCRYPTION_KEY"; then
+        log_message "Encryption completed"
+        rm -f "$COMPRESSED_FILE"  # Remove unencrypted file
+        UPLOAD_FILE="$ENCRYPTED_FILE"
+        S3_FILENAME="${S3_FILENAME}.enc"
+        ENCRYPTION_USED="Yes"
+    else
+        log_message "WARNING: Encryption failed, uploading unencrypted"
+    fi
+else
+    log_message "No encryption key found, uploading unencrypted"
+fi
+
+# Step 4: Upload to S3
+S3_PATH="s3://$AWS_BACKUP_BUCKET/mariadb-full/$(hostname)/$(date +%Y/%m)/$S3_FILENAME"
+log_message "Uploading to: $S3_PATH"
+
+UPLOAD_START=$(date +%s)
+if aws s3 cp "$UPLOAD_FILE" "$S3_PATH"; then
+    UPLOAD_END=$(date +%s)
+    UPLOAD_DURATION=$((UPLOAD_END - UPLOAD_START))
+    log_message "Upload completed successfully in ${UPLOAD_DURATION} seconds"
+    UPLOAD_SUCCESS=true
+else
+    log_message "ERROR: Upload to S3 failed"
+    UPLOAD_SUCCESS=false
+fi
+
+# Step 5: Verify the upload
+if [ "$UPLOAD_SUCCESS" = true ]; then
+    log_message "Verifying S3 upload"
+
+    if aws s3 ls "$S3_PATH" >/dev/null 2>&1; then
+        S3_SIZE=$(aws s3api head-object --bucket "$AWS_BACKUP_BUCKET" --key "mariadb-full/$(hostname)/$(date +%Y/%m)/$S3_FILENAME" --query 'ContentLength' --output text 2>/dev/null || echo "0")
+
+        if [ "$S3_SIZE" = "$BACKUP_SIZE" ]; then
+            log_message "Verification successful - sizes match"
+            VERIFY_SUCCESS=true
         else
-            S3_RESULT="failed"
-            log_message "WARNING: S3 upload failed - local backup retained"
+            log_message "WARNING: S3 size ($S3_SIZE) doesn't match local size ($BACKUP_SIZE)"
+            VERIFY_SUCCESS=false
         fi
     else
-        LOCAL_RESULT="failed"
-        log_message "ERROR: Compression failed"
-        rm -f "$LOCAL_PATH"
+        log_message "WARNING: Cannot verify S3 upload"
+        VERIFY_SUCCESS=false
     fi
-fi
-
-# Determine overall status
-if [ "$BACKUP_STREAM_STATUS" = "failed" ]; then
-    BACKUP_STATUS="$STATUS_ERROR"
-    LOCAL_COPY="failed"
-
-    logger -t soc2-security "BACKUP_FAILURE: service=mariadb severity=critical"
-    echo "MariaDB full backup failed on $(hostname)" | \
-        mail -s "[BACKUP CRITICAL] MariaDB Full Backup Failed - $(hostname)" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
-    exit 1
-
-elif [ "$S3_RESULT" = "failed" ] && [ "$LOCAL_RESULT" = "failed" ]; then
-    BACKUP_STATUS="$STATUS_ERROR"
-    LOCAL_COPY="failed"
-
-    logger -t soc2-security "BACKUP_FAILURE: service=mariadb severity=critical storage=both_failed"
-    echo "MariaDB backup failed - both S3 and local storage failed on $(hostname)" | \
-        mail -s "[BACKUP CRITICAL] Complete Storage Failure - $(hostname)" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
-    exit 1
-
-elif [ "$S3_RESULT" = "failed" ]; then
-    BACKUP_STATUS="$STATUS_WARNING"
-    LOCAL_COPY="success"
-
-    log_message "WARNING: S3 upload failed but local backup succeeded"
-    logger -t soc2-security "BACKUP_WARNING: service=mariadb severity=high issue=s3_upload_failed local_backup=available"
-
 else
-    BACKUP_STATUS="$STATUS_SUCCESS"
-    LOCAL_COPY="success"
-    log_message "Backup completed successfully to both destinations"
+    VERIFY_SUCCESS=false
 fi
 
+# Step 6: Clean up old local backups (keep 7 days)
+log_message "Cleaning local backups older than $LOCAL_RETAIN_DAYS days"
+CLEANED_COUNT=$(find "$BACKUP_BASE_DIR" -name "mariadb-*.tar.bz2*" -mtime +$LOCAL_RETAIN_DAYS -print -delete 2>/dev/null | wc -l || echo "0")
+if [ "$CLEANED_COUNT" -gt 0 ]; then
+    log_message "Removed $CLEANED_COUNT old backup(s)"
+fi
+
+# Count remaining local backups
+LOCAL_COUNT=$(find "$BACKUP_BASE_DIR" -name "mariadb-*.tar.bz2*" 2>/dev/null | wc -l)
+LOCAL_TOTAL_SIZE=$(du -sh "$BACKUP_BASE_DIR" 2>/dev/null | cut -f1 || echo "Unknown")
+
+# Calculate backup duration
 BACKUP_END=$(date +%s)
 BACKUP_DURATION=$((BACKUP_END - BACKUP_START))
 
-# Get backup sizes
-if [ -f "$COMPRESSED_PATH" ]; then
-    LOCAL_SIZE=$(stat -c%s "$COMPRESSED_PATH" 2>/dev/null || echo "0")
-    LOCAL_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B $LOCAL_SIZE 2>/dev/null || echo "$LOCAL_SIZE bytes")
+# Determine overall status for subject line
+if [ "$UPLOAD_SUCCESS" = true ] && [ "$VERIFY_SUCCESS" = true ]; then
+    BACKUP_STATUS="Success"
+    STATUS_EMOJI="✅"
 else
-    LOCAL_SIZE=0
-    LOCAL_SIZE_HUMAN="N/A"
+    BACKUP_STATUS="FAILED"
+    STATUS_EMOJI="❌"
 fi
 
-# Use local size for metrics since S3 upload might have failed
-BACKUP_SIZE=$LOCAL_SIZE
-
-# Log structured metrics
-log_metrics "$BACKUP_SIZE" "$BACKUP_STATUS" "$BACKUP_DURATION" "$LOCAL_COPY"
-
-# Count local backups for reporting
-LOCAL_BACKUP_COUNT=$(find "$LOCAL_BACKUP_DIR" -name "mariadb-*.bz2" 2>/dev/null | wc -l)
-LOCAL_BACKUP_TOTAL=$(du -sh "$LOCAL_BACKUP_DIR" 2>/dev/null | cut -f1 || echo "Unknown")
-
-# Send notification with enhanced status information
-{
-    echo "MariaDB full backup completed on $(hostname)"
-    echo ""
-    echo "Backup Summary:"
-    echo "- Timestamp: $DATE_STAMP"
-    echo "- Duration: ${BACKUP_DURATION} seconds"
-    echo "- Status: $BACKUP_STATUS"
-    echo ""
-    echo "Storage Destinations:"
-    if [ "$S3_RESULT" = "success" ]; then
-        echo "✓ S3 Upload: Success"
-        echo "  Location: $S3_PATH"
-        echo "  Size: $LOCAL_SIZE_HUMAN"
-    else
-        echo "✗ S3 Upload: FAILED"
-        echo "  Check network connectivity and AWS credentials"
-    fi
-    echo ""
-    if [ "$LOCAL_RESULT" = "success" ]; then
-        echo "✓ Local Backup: Success"
-        echo "  Location: $COMPRESSED_PATH"
-        echo "  Size: $LOCAL_SIZE_HUMAN"
-        echo "  Compression: pbzip2 (parallel)"
-    else
-        echo "✗ Local Backup: FAILED"
-        echo "  Check disk space in $LOCAL_BACKUP_DIR"
-    fi
-    echo ""
-    echo "Local Backup Inventory:"
-    echo "- Files stored: $LOCAL_BACKUP_COUNT"
-    echo "- Total size: $LOCAL_BACKUP_TOTAL"
-    echo "- Retention: $LOCAL_RETAIN_DAYS days"
-    echo ""
-    echo "Recovery Instructions:"
-    if [ "$LOCAL_RESULT" = "success" ]; then
-        echo "From local backup (fastest):"
-        echo "1. Decompress: pbzip2 -d -k $COMPRESSED_PATH"
-        echo "2. Extract: mbstream -x < ${COMPRESSED_PATH%.bz2}"
-        echo "3. Prepare: mariadb-backup --prepare --target-dir=."
-        echo "4. Restore: mariadb-backup --copy-back --target-dir=."
-    fi
-    if [ "$S3_RESULT" = "success" ]; then
+# Step 7: Send appropriate email based on day of week
+if [ "$DAY_OF_WEEK" = "1" ] || [ "$BACKUP_STATUS" = "FAILED" ]; then
+    # Monday = weekly detailed report, or any day if backup failed
+    {
+        echo "MariaDB Full Backup Report - $(hostname)"
+        echo "Date: $(date)"
         echo ""
-        echo "From S3 backup:"
-        echo "1. Download: aws s3 cp $S3_PATH backup.mbstream.bz2"
-        echo "2. Decompress: pbzip2 -d backup.mbstream.bz2"
-        echo "3. Extract: mbstream -x < backup.mbstream"
-        echo "4. Prepare: mariadb-backup --prepare --target-dir=."
-        echo "5. Restore: mariadb-backup --copy-back --target-dir=."
-    fi
-
-    if [ "$S3_RESULT" = "failed" ] && [ "$LOCAL_RESULT" = "success" ]; then
+        echo "Backup Summary:"
+        echo "- Timestamp: $DATE_STAMP"
+        echo "- Duration: ${BACKUP_DURATION} seconds"
+        echo "- Size: $BACKUP_SIZE_HUMAN"
+        echo "- Encryption: $ENCRYPTION_USED"
         echo ""
-        echo "⚠️  ACTION REQUIRED: S3 upload failed but local backup is available."
-        echo "Please investigate S3 connectivity to ensure off-site backups resume."
-    fi
+        echo "Status:"
+        echo "- Local backup: $([ -f "$UPLOAD_FILE" ] && echo "✓ Success" || echo "✗ Failed")"
+        echo "- S3 upload: $([ "$UPLOAD_SUCCESS" = true ] && echo "✓ Success" || echo "✗ Failed")"
+        echo "- Verification: $([ "$VERIFY_SUCCESS" = true ] && echo "✓ Verified" || echo "⚠ Not verified")"
+        echo ""
+        echo "Storage:"
+        echo "- S3 location: $S3_PATH"
+        echo "- Local backups: $LOCAL_COUNT files, $LOCAL_TOTAL_SIZE total"
+        echo "- Local retention: $LOCAL_RETAIN_DAYS days"
+        echo "- S3 retention: $S3_RETAIN_MARIADB_FULL days"
+        echo ""
 
-} | mail -s "[Backup] MariaDB Full - $BACKUP_STATUS - $(hostname)" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+        if [ "$UPLOAD_SUCCESS" = true ] && [ "$VERIFY_SUCCESS" = true ]; then
+            echo "Recovery Instructions:"
+            echo "1. Download: aws s3 cp $S3_PATH backup.tar.bz2.enc"
+            if [ "$ENCRYPTION_USED" = "Yes" ]; then
+                echo "2. Decrypt: openssl enc -aes-256-cbc -d -pbkdf2 -in backup.tar.bz2.enc -out backup.tar.bz2 -pass file:/root/.backup-encryption-key"
+                echo "3. Extract: tar -xjf backup.tar.bz2"
+            else
+                echo "2. Extract: tar -xjf backup.tar.bz2"
+            fi
+            echo "3. Prepare: mariadb-backup --prepare --target-dir=backup-$DATE_STAMP"
+            echo "4. Stop MariaDB: systemctl stop mariadb"
+            echo "5. Restore: mariadb-backup --copy-back --target-dir=backup-$DATE_STAMP"
+            echo "6. Fix permissions: chown -R mysql:mysql /var/lib/mysql"
+            echo "7. Start MariaDB: systemctl start mariadb"
+        else
+            echo "⚠️  ACTION REQUIRED:"
+            echo "Backup did not complete successfully. Please investigate immediately."
+            echo "Check log: $LOG_FILE"
+        fi
 
-log_message "MariaDB full backup completed"
+    } | mail -s "[Backup] MariaDB Full - $BACKUP_STATUS - $(hostname)" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+else
+    # Daily brief status email
+    {
+        echo "$STATUS_EMOJI MariaDB backup completed on $(hostname)"
+        echo ""
+        echo "Size: $BACKUP_SIZE_HUMAN | Duration: ${BACKUP_DURATION}s | Encrypted: $ENCRYPTION_USED"
+        echo "Local: $LOCAL_COUNT backups ($LOCAL_TOTAL_SIZE) | S3: Verified"
+        echo ""
+        echo "Full report every Monday. Detailed log: $LOG_FILE"
+    } | mail -s "[Backup] MariaDB - $STATUS_EMOJI $(hostname)" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+fi
+
+# Log final status with structured metrics
+if [ "$UPLOAD_SUCCESS" = true ] && [ "$VERIFY_SUCCESS" = true ]; then
+    log_message "Backup completed successfully"
+    logger -t soc2-backup "OPERATION_COMPLETE: service=backup operation=mariadb_full status=success size_bytes=$BACKUP_SIZE duration_seconds=$BACKUP_DURATION encrypted=$ENCRYPTION_USED"
+else
+    log_message "Backup completed with issues"
+    logger -t soc2-backup "OPERATION_COMPLETE: service=backup operation=mariadb_full status=warning size_bytes=$BACKUP_SIZE duration_seconds=$BACKUP_DURATION upload=$UPLOAD_SUCCESS verify=$VERIFY_SUCCESS encrypted=$ENCRYPTION_USED"
+fi
