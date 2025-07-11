@@ -66,6 +66,25 @@ fi
 
 log_message "Current binary log: $CURRENT_BINLOG (will not upload)"
 
+# Check if current binary log is getting stale (older than 1 hour)
+# This prevents losing too much data during low-activity periods
+if [ -f "$BINLOG_DIR/$CURRENT_BINLOG" ]; then
+    BINLOG_AGE_MINUTES=$(( ($(date +%s) - $(stat -c %Y "$BINLOG_DIR/$CURRENT_BINLOG")) / 60 ))
+
+    if [ "$BINLOG_AGE_MINUTES" -gt 60 ]; then
+        log_message "Current binary log is $BINLOG_AGE_MINUTES minutes old - forcing rotation"
+
+        # Flush logs to create a new binary log file
+        if mysql --defaults-file="$MARIADB_DEFAULTS_FILE" -e "FLUSH BINARY LOGS;" 2>/dev/null; then
+            log_message "Binary log rotation completed"
+            # Give MariaDB a moment to complete the rotation
+            sleep 2
+        else
+            log_message "WARNING: Could not flush binary logs"
+        fi
+    fi
+fi
+
 # Find all binary logs except the current one
 cd "$BINLOG_DIR"
 AVAILABLE_BINLOGS=$(ls -1 mysql-bin.[0-9]* 2>/dev/null | grep -v "$CURRENT_BINLOG" | sort || true)
