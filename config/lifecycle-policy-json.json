@@ -41,10 +41,10 @@
             }
         },
         {
-            "Id": "CriticalPaths",
+            "Id": "FileBackups",
             "Status": "Enabled",
             "Filter": {
-                "Prefix": "critical/"
+                "Prefix": "files/"
             },
             "Transitions": [
                 {
