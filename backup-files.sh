@@ -56,16 +56,7 @@ for FILE_PATH in "${FILE_BACKUP_PATHS[@]}"; do
     # Capture sync output
     SYNC_OUTPUT=$(mktemp)
 
-    if aws s3 sync "$CRITICAL_PATH" "$S3_PATH" \
-        --storage-class STANDARD_IA \
-        --exclude "*.tmp" \
-        --exclude "*.temp" \
-        --exclude "*.swp" \
-        --exclude "*~" \
-        --exclude ".DS_Store" \
-        --exclude "*/cache/*" \
-        --exclude "*/tmp/*" \
-        2>&1 | tee "$SYNC_OUTPUT"; then
+    if aws s3 sync "$CRITICAL_PATH" "$S3_PATH" 2>&1 | tee "$SYNC_OUTPUT"; then
 
         # Count what was synced
         FILES_UPLOADED=$(grep -c "^upload: " "$SYNC_OUTPUT" 2>/dev/null || echo "0")
