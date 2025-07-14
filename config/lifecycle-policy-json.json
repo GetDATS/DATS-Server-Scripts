@@ -13,7 +13,7 @@
                 }
             ],
             "Expiration": {
-                "Days": 7
+                "Days": 30
             }
         },
         {
@@ -41,10 +41,10 @@
             }
         },
         {
-            "Id": "HomeBackups",
+            "Id": "CriticalPaths",
             "Status": "Enabled",
             "Filter": {
-                "Prefix": "home/"
+                "Prefix": "critical/"
             },
             "Transitions": [
                 {
@@ -54,14 +54,10 @@
                 {
                     "Days": 30,
                     "StorageClass": "GLACIER_IR"
-                },
-                {
-                    "Days": 60,
-                    "StorageClass": "DEEP_ARCHIVE"
                 }
             ],
-            "Expiration": {
-                "Days": 90
+            "NoncurrentVersionExpiration": {
+                "NoncurrentDays": 90
             }
         },
         {
