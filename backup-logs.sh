@@ -121,7 +121,11 @@ done
 
 # Remove empty lines and count
 ROTATED_LOGS=$(echo "$ROTATED_LOGS" | grep -v "^$" || true)
-FILE_COUNT=$(echo "$ROTATED_LOGS" | grep -c "." 2>/dev/null || echo "0")
+if [ -z "$ROTATED_LOGS" ]; then
+    FILE_COUNT=0
+else
+    FILE_COUNT=$(echo "$ROTATED_LOGS" | wc -l | tr -d ' ')
+fi
 
 if [ "$FILE_COUNT" -eq 0 ]; then
     log_message "No new rotated logs found to archive"

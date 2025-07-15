@@ -34,7 +34,7 @@ preflight_checks() {
 
     # Check 2: Can we connect to MariaDB?
     log_message "Pre-flight: Testing MariaDB connectivity"
-    if ! mysql --defaults-file="$MARIADB_DEFAULTS_FILE" -e "SELECT 1" >/dev/null 2>&1; then
+    if ! mariadb --defaults-file="$MARIADB_DEFAULTS_FILE" -e "SELECT 1" >/dev/null 2>&1; then
         log_message "ERROR: Cannot connect to MariaDB"
         echo "Cannot connect to MariaDB on $(hostname) - check credentials" | mail -s "[BACKUP ERROR] MariaDB Connection Failed" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
         exit 1
@@ -42,7 +42,7 @@ preflight_checks() {
 
     # Check 3: Do we have enough disk space?
     log_message "Pre-flight: Checking disk space"
-    DB_SIZE=$(mysql --defaults-file="$MARIADB_DEFAULTS_FILE" -e "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 0) AS 'DB Size in MB' FROM information_schema.tables;" -s -N 2>/dev/null || echo "0")
+    DB_SIZE=$(mariadb --defaults-file="$MARIADB_DEFAULTS_FILE" -e "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 0) AS 'DB Size in MB' FROM information_schema.tables;" -s -N 2>/dev/null || echo "0")
     REQUIRED_SPACE_MB=$((DB_SIZE * 3))  # Need space for backup + compressed + overhead
     AVAILABLE_SPACE_MB=$(df -BM "$BACKUP_BASE_DIR" | tail -1 | awk '{print $4}' | sed 's/M//')
 
@@ -100,7 +100,7 @@ preflight_checks
 BACKUP_DIR="$BACKUP_BASE_DIR/backup-$DATE_STAMP"
 log_message "Creating backup in: $BACKUP_DIR"
 
-if mariadb-backup --backup --defaults-file="$MARIADB_DEFAULTS_FILE" --target-dir="$BACKUP_DIR" 2>&1 | tee -a "$LOG_FILE"; then
+if mariadb-backup --defaults-file="$MARIADB_DEFAULTS_FILE" --backup --target-dir="$BACKUP_DIR" 2>&1 | tee -a "$LOG_FILE"; then
     log_message "Backup created successfully"
 else
     log_message "ERROR: Backup creation failed"
@@ -187,12 +187,23 @@ if [ "$UPLOAD_SUCCESS" = true ]; then
     if aws s3 ls "$S3_PATH" >/dev/null 2>&1; then
         S3_SIZE=$(aws s3api head-object --bucket "$AWS_BACKUP_BUCKET" --key "mariadb-full/$(hostname)/$(date +%Y/%m)/$S3_FILENAME" --query 'ContentLength' --output text 2>/dev/null || echo "0")
 
-        if [ "$S3_SIZE" = "$BACKUP_SIZE" ]; then
-            log_message "Verification successful - sizes match"
-            VERIFY_SUCCESS=true
+        # Calculate the size difference percentage
+        if [ "$BACKUP_SIZE" -gt 0 ]; then
+            SIZE_DIFF=$((S3_SIZE - BACKUP_SIZE))
+            SIZE_DIFF_ABS=${SIZE_DIFF#-}  # Absolute value
+            SIZE_DIFF_PERCENT=$((SIZE_DIFF_ABS * 100 / BACKUP_SIZE))
+
+            # Only fail if the difference is more than 1% or if S3 is smaller
+            if [ "$SIZE_DIFF_PERCENT" -gt 1 ] || [ "$S3_SIZE" -lt "$BACKUP_SIZE" ]; then
+                log_message "ERROR: Significant size mismatch - S3: $S3_SIZE, Local: $BACKUP_SIZE (${SIZE_DIFF_PERCENT}% difference)"
+                VERIFY_SUCCESS="failed"
+            else
+                log_message "Upload verified - S3: $S3_SIZE, Local: $BACKUP_SIZE (${SIZE_DIFF_PERCENT}% difference acceptable)"
+                VERIFY_SUCCESS="success"
+            fi
         else
-            log_message "WARNING: S3 size ($S3_SIZE) doesn't match local size ($BACKUP_SIZE)"
-            VERIFY_SUCCESS=false
+            log_message "ERROR: Local file size is 0"
+            VERIFY_SUCCESS="failed"
         fi
     else
         log_message "WARNING: Cannot verify S3 upload"

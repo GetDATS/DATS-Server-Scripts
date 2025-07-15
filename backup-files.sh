@@ -48,18 +48,24 @@ for FILE_PATH in "${FILE_BACKUP_PATHS[@]}"; do
     fi
 
     # Create S3 path that preserves structure
-    # Convert /home/dats/websites/... to s3://bucket/files/home/dats/websites/...
-    S3_PATH="s3://$AWS_BACKUP_BUCKET/files${FILE_PATH}/"
+    S3_PATH="s3://$AWS_BACKUP_BUCKET/files/$(hostname)${FILE_PATH}/"
 
     log_message "Syncing: $FILE_PATH"
 
     # Capture sync output
     SYNC_OUTPUT=$(mktemp)
 
-    if aws s3 sync "$CRITICAL_PATH" "$S3_PATH" 2>&1 | tee "$SYNC_OUTPUT"; then
+    if aws s3 sync "$FILE_PATH" "$S3_PATH" 2>&1 | tee "$SYNC_OUTPUT"; then
 
         # Count what was synced
-        FILES_UPLOADED=$(grep -c "^upload: " "$SYNC_OUTPUT" 2>/dev/null || echo "0")
+        FILES_UPLOADED=0
+        if [ -f "$SYNC_OUTPUT" ]; then
+            FILES_UPLOADED=$(grep -c "^upload: " "$SYNC_OUTPUT" || true)
+            # Ensure it's a valid number
+            if ! [[ "$FILES_UPLOADED" =~ ^[0-9]+$ ]]; then
+                FILES_UPLOADED=0
+            fi
+        fi
         TOTAL_FILES_SYNCED=$((TOTAL_FILES_SYNCED + FILES_UPLOADED))
         TOTAL_PATHS_SYNCED=$((TOTAL_PATHS_SYNCED + 1))
 
