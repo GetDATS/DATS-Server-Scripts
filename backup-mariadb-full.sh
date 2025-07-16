@@ -196,14 +196,14 @@ if [ "$UPLOAD_SUCCESS" = true ]; then
             # Only fail if the difference is more than 1% or if S3 is smaller
             if [ "$SIZE_DIFF_PERCENT" -gt 1 ] || [ "$S3_SIZE" -lt "$BACKUP_SIZE" ]; then
                 log_message "ERROR: Significant size mismatch - S3: $S3_SIZE, Local: $BACKUP_SIZE (${SIZE_DIFF_PERCENT}% difference)"
-                VERIFY_SUCCESS="failed"
+                VERIFY_SUCCESS=false
             else
                 log_message "Upload verified - S3: $S3_SIZE, Local: $BACKUP_SIZE (${SIZE_DIFF_PERCENT}% difference acceptable)"
-                VERIFY_SUCCESS="success"
+                VERIFY_SUCCESS=true
             fi
         else
             log_message "ERROR: Local file size is 0"
-            VERIFY_SUCCESS="failed"
+            VERIFY_SUCCESS=false
         fi
     else
         log_message "WARNING: Cannot verify S3 upload"
