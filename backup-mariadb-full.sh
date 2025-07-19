@@ -43,7 +43,7 @@ preflight_checks() {
     # Check 3: Do we have enough disk space?
     log_message "Pre-flight: Checking disk space"
     DB_SIZE=$(mariadb --defaults-file="$MARIADB_DEFAULTS_FILE" -e "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 0) AS 'DB Size in MB' FROM information_schema.tables;" -s -N 2>/dev/null || echo "0")
-    REQUIRED_SPACE_MB=$((DB_SIZE * 3))  # Need space for backup + compressed + overhead
+    REQUIRED_SPACE_MB=$((DB_SIZE * 3/2))  # Need space for backup + compressed + overhead
     AVAILABLE_SPACE_MB=$(df -BM "$BACKUP_BASE_DIR" | tail -1 | awk '{print $4}' | sed 's/M//')
 
     if [ "$AVAILABLE_SPACE_MB" -lt "$REQUIRED_SPACE_MB" ]; then
