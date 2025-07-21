@@ -129,7 +129,7 @@ fi
 COMPRESSED_FILE="$BACKUP_BASE_DIR/mariadb-$DATE_STAMP.tar.bz2"
 log_message "Compressing backup to: $COMPRESSED_FILE"
 
-if tar -cf - -C "$BACKUP_BASE_DIR" "backup-$DATE_STAMP" | nice -n 19 ionice -c2 -n7 pbzip2 -c > "$COMPRESSED_FILE"; then
+if tar -cf - -C "$BACKUP_BASE_DIR" "backup-$DATE_STAMP" | nice -n 19 ionice -c2 -n7 pbzip2 -p16 -c > "$COMPRESSED_FILE"; then
     log_message "Compression completed"
     # Remove uncompressed directory to save space
     rm -rf "$BACKUP_DIR"
