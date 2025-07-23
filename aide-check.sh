@@ -61,8 +61,25 @@ CHECK_END=$(date +%s)
 CHECK_DURATION=$((CHECK_END - CHECK_START))
 
 # Count total changes and critical changes
-TOTAL_CHANGES=$(grep -c "^f[+\.-]" "$AIDE_RESULT" 2>/dev/null || echo "0")
-CRITICAL_CHANGES=$(grep -cE "^f[+\.-].*/etc/|^f[+\.-].*/boot/|^f[+\.-].*/usr/local/bin/" "$AIDE_RESULT" 2>/dev/null || echo "0")
+if grep -qE "(Changed:|Added:|Removed:|changed|added|removed|differ)" "$AIDE_RESULT"; then
+    # Count changes more reliably
+    TOTAL_CHANGES=$(grep -cE "(Changed:|Added:|Removed:|changed|added|removed|differ)" "$AIDE_RESULT" || echo "0")
+
+    # Count critical path changes - put it all on one line to avoid issues
+    CRITICAL_CHANGES=$(grep -E "(Changed:|Added:|Removed:|changed|added|removed|differ)" "$AIDE_RESULT" | grep -cE "(\/etc\/|\/boot\/|\/usr\/local\/bin\/)" || echo "0")
+else
+    # No change indicators found
+    TOTAL_CHANGES=0
+    CRITICAL_CHANGES=0
+fi
+
+# Clean up the variables to ensure they're pure integers
+TOTAL_CHANGES=$(echo "$TOTAL_CHANGES" | tr -d '[:space:]')
+CRITICAL_CHANGES=$(echo "$CRITICAL_CHANGES" | tr -d '[:space:]')
+
+# Extra safety: ensure they're valid integers
+TOTAL_CHANGES=${TOTAL_CHANGES:-0}
+CRITICAL_CHANGES=${CRITICAL_CHANGES:-0}
 
 # Log structured metrics for monitoring
 log_metrics "$TOTAL_CHANGES" "$CRITICAL_CHANGES" "$AIDE_STATUS" "$CHECK_DURATION"
