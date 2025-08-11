@@ -62,11 +62,22 @@ CHECK_DURATION=$((CHECK_END - CHECK_START))
 
 # Count total changes and critical changes
 if grep -qE "(Changed:|Added:|Removed:|changed|added|removed|differ)" "$AIDE_RESULT"; then
-    # Count changes more reliably
-    TOTAL_CHANGES=$(grep -cE "(Changed:|Added:|Removed:|changed|added|removed|differ)" "$AIDE_RESULT" || echo "0")
+    # Extract counts from AIDE's summary section - much more reliable
+    CHANGED_COUNT=$(grep "^  Changed entries:" "$AIDE_RESULT" | awk '{print $3}')
+    ADDED_COUNT=$(grep "^  Added entries:" "$AIDE_RESULT" | awk '{print $3}')
+    REMOVED_COUNT=$(grep "^  Removed entries:" "$AIDE_RESULT" | awk '{print $3}')
 
-    # Count critical path changes - put it all on one line to avoid issues
-    CRITICAL_CHANGES=$(grep -E "(Changed:|Added:|Removed:|changed|added|removed|differ)" "$AIDE_RESULT" | grep -cE "(\/etc\/|\/boot\/|\/usr\/local\/bin\/)" || echo "0")
+    # Make sure we got numbers, default to 0 if not
+    CHANGED_COUNT=${CHANGED_COUNT:-0}
+    ADDED_COUNT=${ADDED_COUNT:-0}
+    REMOVED_COUNT=${REMOVED_COUNT:-0}
+
+    # Calculate total changes
+    TOTAL_CHANGES=$((CHANGED_COUNT + ADDED_COUNT + REMOVED_COUNT))
+
+    # For critical changes, we still need to look at the actual paths
+    # Check if any changed/added/removed entries are in critical directories
+    CRITICAL_CHANGES=$(grep -E "^[fdl] [=+<>].*(/etc/|/boot/|/usr/local/bin/)" "$AIDE_RESULT" | grep -c "" || echo "0")
 else
     # No change indicators found
     TOTAL_CHANGES=0
