@@ -100,7 +100,11 @@ preflight_checks
 BACKUP_DIR="$BACKUP_BASE_DIR/backup-$DATE_STAMP"
 log_message "Creating backup in: $BACKUP_DIR"
 
-if mariadb-backup --defaults-file="$MARIADB_DEFAULTS_FILE" --backup --target-dir="$BACKUP_DIR" 2>&1 | tee -a "$LOG_FILE"; then
+# Convert array to space-separated string for mariadb-backup
+DATABASES_STRING="${MARIADB_DATABASES_TO_BACKUP[*]}"
+log_message "Backing up databases: $DATABASES_STRING"
+
+if mariadb-backup --defaults-file="$MARIADB_DEFAULTS_FILE" --backup --databases="$DATABASES_STRING" --target-dir="$BACKUP_DIR" 2>&1 | tee -a "$LOG_FILE"; then
     log_message "Backup created successfully"
 else
     log_message "ERROR: Backup creation failed"
