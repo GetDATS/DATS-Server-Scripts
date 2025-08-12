@@ -101,10 +101,7 @@ BACKUP_DIR="$BACKUP_BASE_DIR/backup-$DATE_STAMP"
 log_message "Creating backup in: $BACKUP_DIR"
 
 # Convert array to space-separated string for mariadb-backup
-DATABASES_STRING="${MARIADB_DATABASES_TO_BACKUP[*]}"
-log_message "Backing up databases: $DATABASES_STRING"
-
-if mariadb-backup --defaults-file="$MARIADB_DEFAULTS_FILE" --backup --databases="$DATABASES_STRING" --target-dir="$BACKUP_DIR" 2>&1 | tee -a "$LOG_FILE"; then
+if mariadb-backup --defaults-file="$MARIADB_DEFAULTS_FILE" --backup --target-dir="$BACKUP_DIR" 2>&1 | tee -a "$LOG_FILE"; then
     log_message "Backup created successfully"
 else
     log_message "ERROR: Backup creation failed"
@@ -271,9 +268,9 @@ if [ "$DAY_OF_WEEK" = "1" ] || [ "$BACKUP_STATUS" = "FAILED" ]; then
             echo "1. Download: aws s3 cp $S3_PATH backup.tar.bz2.enc"
             if [ "$ENCRYPTION_USED" = "Yes" ]; then
                 echo "2. Decrypt: openssl enc -aes-256-cbc -d -pbkdf2 -in backup.tar.bz2.enc -out backup.tar.bz2 -pass file:/root/.backup-encryption-key"
-                echo "3. Extract: tar -xjf backup.tar.bz2"
+                echo "3. Extract: pbzip2 -dvc backup.tar.bz2 | tar -xv"
             else
-                echo "2. Extract: tar -xjf backup.tar.bz2"
+                echo "2. Extract: pbzip2 -dvc backup.tar.bz2 | tar -xv"
             fi
             echo "3. Prepare: mariadb-backup --prepare --target-dir=backup-$DATE_STAMP"
             echo "4. Stop MariaDB: systemctl stop mariadb"
