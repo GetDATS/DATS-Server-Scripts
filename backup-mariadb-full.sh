@@ -293,7 +293,7 @@ else
         echo "Local: $LOCAL_COUNT backups ($LOCAL_TOTAL_SIZE) | S3: Verified"
         echo ""
         echo "Full report every Monday. Detailed log: $LOG_FILE"
-    } | mail -s "[Backup] MariaDB - $STATUS_EMOJI $(hostname)" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+    } | mail -s "[Backup] MariaDB Daily - $BACKUP_STATUS - $(hostname)" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
 fi
 
 # Log final status with structured metrics
