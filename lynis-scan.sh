@@ -1,173 +1,167 @@
 #!/bin/bash
 set -euo pipefail
 
-# Lynis security scanner with monitoring integration
-# Focuses on security assessment without unnecessary complexity
-
-# Load configuration from SOC2 config files
+# Load configuration
 source /usr/local/share/soc2-scripts/config/common.conf
 source /usr/local/share/soc2-scripts/config/lynis-scan.conf
 
-# Generate timestamped filenames
+# Variables
 DATE_STAMP=$(date +%Y%m%d)
-REPORT_FILE="$LOG_DIR/lynis-report-$DATE_STAMP.txt"
-LOG_FILE="$LOG_DIR/lynis-scan-$DATE_STAMP.log"
+TIME_STAMP=$(date +%Y%m%d-%H%M%S)
+SCAN_OUTPUT="$LOG_DIR/lynis-output-$TIME_STAMP.txt"
+REPORT_DATA="$LOG_DIR/lynis-report-$TIME_STAMP.dat"
+EMAIL_CONTENT="$LOG_DIR/lynis-email-$TIME_STAMP.txt"
 
-# Structured logging function for monitoring integration
-log_message() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
-    # Use consistent tag for syslog routing
-    logger -t soc2-lynis "$1"
-}
-
-# Log structured metrics for monitoring
-log_metrics() {
-    local warnings=$1
-    local suggestions=$2
-    local manual_items=$3
-    local hardening_index=$4
-    local status=$5
-    local operation_duration=${6:-0}
-
-    # Structured log entry for monitoring system
-    logger -t soc2-lynis "OPERATION_COMPLETE: service=lynis operation=security_scan warnings=$warnings suggestions=$suggestions manual_items=$manual_items hardening_index=$hardening_index status=$status duration_seconds=$operation_duration"
-}
-
-# Ensure log directory exists
 mkdir -p "$LOG_DIR"
 
-log_message "Starting Lynis security assessment"
+# Initialize scan log
+cat > "$SCAN_OUTPUT" << EOF
+================================================================================
+LYNIS SECURITY SCAN - $SERVER_NAME
+$(date '+%Y-%m-%d %H:%M:%S')
+================================================================================
+
+EOF
+
 SCAN_START=$(date +%s)
 
-# Run Lynis scan
-if lynis audit system --logfile "$LOG_FILE" --report-file "$REPORT_FILE" --profile /etc/lynis/custom.prf 2>/dev/null; then
-    SCAN_STATUS="$STATUS_SUCCESS"
+# Run scan
+echo "Running security audit..." >> "$SCAN_OUTPUT"
+
+TEMP_OUTPUT=$(mktemp)
+if lynis audit system \
+    --no-colors \
+    --quick \
+    --report-file "$REPORT_DATA" \
+    --profile /etc/lynis/custom.prf 2>&1 | tee "$TEMP_OUTPUT"; then
+    SCAN_STATUS="success"
 else
-    SCAN_STATUS="$STATUS_ERROR"
-    log_message "ERROR: Lynis scan execution failed"
-    logger -t soc2-lynis "OPERATION_COMPLETE: service=lynis operation=security_scan status=$STATUS_ERROR error=scan_execution_failed"
-    echo "Lynis scan failed on $(hostname) at $(date)" | mail -s "[SECURITY ERROR] Lynis Scan Failed" -r "$LYNIS_EMAIL_FROM" "$ADMIN_EMAIL"
-    exit 1
+    SCAN_STATUS="error"
+    SCAN_EXIT=$?
 fi
+
+# Strip terminal control codes
+cat "$TEMP_OUTPUT" | sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g' | \
+    sed 's/\[[0-9]*[CK]//g' | \
+    tr -d '\000-\010\013-\037' >> "$SCAN_OUTPUT"
+rm -f "$TEMP_OUTPUT"
 
 SCAN_END=$(date +%s)
 SCAN_DURATION=$((SCAN_END - SCAN_START))
 
-# Count findings with bulletproof number extraction
-WARNINGS=$(grep -c "warning\[\]" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
-SUGGESTIONS=$(grep -c "suggestion\[\]" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
-MANUAL_ITEMS=$(grep -c "manual\[\]" "$REPORT_FILE" 2>/dev/null | head -1 | tr -d '\n\r\t ' || echo "0")
+# Extract metrics from report
+WARNINGS="0"
+SUGGESTIONS="0"
+HARDENING_INDEX="0"
 
-# Validate they're actually numbers
+if [ -f "$REPORT_DATA" ]; then
+    WARNINGS=$(grep -E "^warning\[\]" "$REPORT_DATA" 2>/dev/null | wc -l | tr -d ' ')
+    SUGGESTIONS=$(grep -E "^suggestion\[\]" "$REPORT_DATA" 2>/dev/null | wc -l | tr -d ' ')
+    HARDENING_LINE=$(grep -E "^hardening_index=" "$REPORT_DATA" 2>/dev/null || true)
+    if [ -n "$HARDENING_LINE" ]; then
+        HARDENING_INDEX=$(echo "$HARDENING_LINE" | cut -d'=' -f2 | tr -d ' ')
+    fi
+fi
+
+# Validate numbers
 [[ "$WARNINGS" =~ ^[0-9]+$ ]] || WARNINGS="0"
 [[ "$SUGGESTIONS" =~ ^[0-9]+$ ]] || SUGGESTIONS="0"
-[[ "$MANUAL_ITEMS" =~ ^[0-9]+$ ]] || MANUAL_ITEMS="0"
-
-TOTAL_ISSUES=$((WARNINGS + SUGGESTIONS + MANUAL_ITEMS))
-
-# Extract hardening index
-HARDENING_INDEX=$(grep "^hardening_index=" "$REPORT_FILE" 2>/dev/null | cut -d'=' -f2 || echo "0")
 [[ "$HARDENING_INDEX" =~ ^[0-9]+$ ]] || HARDENING_INDEX="0"
 
-# Determine overall status based on findings
-if [ "$WARNINGS" -gt 0 ]; then
-    FINAL_STATUS="$STATUS_WARNING"
-else
-    FINAL_STATUS="$STATUS_SUCCESS"
+# Add completion info
+cat >> "$SCAN_OUTPUT" << EOF
+
+================================================================================
+SCAN COMPLETED
+================================================================================
+Duration: ${SCAN_DURATION} seconds
+Report: $REPORT_DATA
+$(date '+%Y-%m-%d %H:%M:%S')
+
+EOF
+
+# Extract findings from report
+echo "=================================================================================" >> "$SCAN_OUTPUT"
+echo "FINDINGS" >> "$SCAN_OUTPUT"
+echo "=================================================================================" >> "$SCAN_OUTPUT"
+echo "" >> "$SCAN_OUTPUT"
+
+if [ -f "$REPORT_DATA" ] && [ "$WARNINGS" -gt "0" ]; then
+    echo "WARNINGS:" >> "$SCAN_OUTPUT"
+    echo "---------" >> "$SCAN_OUTPUT"
+    grep -E "^warning\[\]" "$REPORT_DATA" 2>/dev/null | while IFS= read -r line; do
+        WARNING_INFO=$(echo "$line" | sed 's/warning\[\]=//' | sed 's/|/ - /g')
+        echo "  $WARNING_INFO" >> "$SCAN_OUTPUT"
+    done
+    echo "" >> "$SCAN_OUTPUT"
 fi
 
-# Log structured metrics for monitoring
-log_metrics "$WARNINGS" "$SUGGESTIONS" "$MANUAL_ITEMS" "$HARDENING_INDEX" "$FINAL_STATUS" "$SCAN_DURATION"
-
-# Handle results - send security-conscious notifications
-if [ "$WARNINGS" -gt 0 ]; then
-    log_message "Security scan completed - $WARNINGS warnings requiring attention"
-
-    # Log detailed findings to secure log for investigation
-    echo "=== SECURITY WARNINGS $(date) ===" >> "$LOG_FILE"
-    grep "warning\[\]" "$REPORT_FILE" >> "$LOG_FILE"
-    echo "=== END SECURITY WARNINGS ===" >> "$LOG_FILE"
-
-    # Log security events for monitoring
-    logger -t soc2-security "SECURITY_FINDINGS: service=lynis warnings=$WARNINGS suggestions=$SUGGESTIONS severity=medium"
-
-    # Determine warning severity for reporting
-    if [ "$WARNINGS" -gt 10 ]; then
-        WARNING_SCALE="high"
-    elif [ "$WARNINGS" -gt 5 ]; then
-        WARNING_SCALE="medium"
-    else
-        WARNING_SCALE="low"
+if [ -f "$REPORT_DATA" ] && [ "$SUGGESTIONS" -gt "0" ]; then
+    SHOW_COUNT=30
+    echo "SUGGESTIONS (showing up to $SHOW_COUNT):" >> "$SCAN_OUTPUT"
+    echo "-----------------------------------" >> "$SCAN_OUTPUT"
+    grep -E "^suggestion\[\]" "$REPORT_DATA" 2>/dev/null | head -$SHOW_COUNT | while IFS= read -r line; do
+        SUGGESTION_INFO=$(echo "$line" | sed 's/suggestion\[\]=//' | sed 's/|/ - /g')
+        echo "  $SUGGESTION_INFO" >> "$SCAN_OUTPUT"
+    done
+    if [ "$SUGGESTIONS" -gt "$SHOW_COUNT" ]; then
+        echo "  ... plus $((SUGGESTIONS - SHOW_COUNT)) more" >> "$SCAN_OUTPUT"
     fi
-
-    {
-        echo "Lynis security scan found $WARNINGS warnings on $(hostname)"
-        echo ""
-        echo "Scan Results:"
-        echo "- Warnings: $WARNING_SCALE severity ($WARNINGS items requiring attention)"
-        echo "- Suggestions: $SUGGESTIONS (recommendations for improvement)"
-        echo "- Manual items: $MANUAL_ITEMS (items requiring review)"
-        echo "- Total findings: $TOTAL_ISSUES"
-        echo "- Hardening index: $HARDENING_INDEX"
-        echo "- Scan duration: ${SCAN_DURATION} seconds"
-        echo ""
-        echo "Security Actions Required:"
-        echo "1. Review detailed findings: $REPORT_FILE"
-        echo "2. Address critical warnings first"
-        echo "3. Plan remediation for remaining items"
-        echo ""
-        echo "Detailed security findings have been logged securely for review."
-        echo "Focus on addressing warnings to improve security posture."
-    } | mail -s "[SECURITY WARNING] Lynis Scan - $WARNINGS warnings - $(hostname)" -r "$LYNIS_EMAIL_FROM" "$ADMIN_EMAIL"
-
-elif [ "$TOTAL_ISSUES" -gt 0 ]; then
-    log_message "Security scan completed - $TOTAL_ISSUES findings (suggestions/manual only)"
-
-    # Determine finding scale for reporting
-    if [ "$TOTAL_ISSUES" -gt 20 ]; then
-        FINDING_SCALE="large"
-    elif [ "$TOTAL_ISSUES" -gt 10 ]; then
-        FINDING_SCALE="medium"
-    else
-        FINDING_SCALE="small"
-    fi
-
-    {
-        echo "Lynis security scan completed on $(hostname)"
-        echo ""
-        echo "Scan Results:"
-        echo "- Warnings: 0 (no critical issues found)"
-        echo "- Suggestions: $FINDING_SCALE scale ($SUGGESTIONS recommendations)"
-        echo "- Manual items: $MANUAL_ITEMS (items for review)"
-        echo "- Total findings: $TOTAL_ISSUES"
-        echo "- Hardening index: $HARDENING_INDEX"
-        echo "- Scan duration: ${SCAN_DURATION} seconds"
-        echo ""
-        echo "No critical warnings found - system security posture is good."
-        echo "Consider reviewing suggestions for further security improvements."
-        echo ""
-        echo "Historical security trends available in monitoring dashboard."
-    } | mail -s "[Lynis] Security Scan - $TOTAL_ISSUES suggestions - $(hostname)" -r "$LYNIS_EMAIL_FROM" "$ADMIN_EMAIL"
-
-else
-    log_message "Security scan completed - no issues found"
-    {
-        echo "Lynis security scan completed successfully on $(hostname)"
-        echo ""
-        echo "Scan Results:"
-        echo "- Warnings: 0"
-        echo "- Suggestions: 0"
-        echo "- Manual items: 0"
-        echo "- Total findings: 0"
-        echo "- Hardening index: $HARDENING_INDEX"
-        echo "- Scan duration: ${SCAN_DURATION} seconds"
-        echo ""
-        echo "Excellent! No security issues found."
-        echo "This indicates a well-hardened system configuration."
-        echo ""
-        echo "Continue regular security assessments to maintain this status."
-        echo "Historical security posture trends available in monitoring dashboard."
-    } | mail -s "[Lynis] Security Scan - Clean - $(hostname)" -r "$LYNIS_EMAIL_FROM" "$ADMIN_EMAIL"
+    echo "" >> "$SCAN_OUTPUT"
 fi
 
-log_message "Security assessment completed"
+# Create email
+cat > "$EMAIL_CONTENT" << EOF
+Lynis Security Scan - $SERVER_NAME
+================================================================================
+
+SUMMARY
+-------
+Warnings:        $WARNINGS
+Suggestions:     $SUGGESTIONS
+Hardening Index: $HARDENING_INDEX/100
+Duration:        ${SCAN_DURATION} seconds
+Date:            $(date '+%Y-%m-%d %H:%M:%S')
+
+EOF
+
+if [ "$WARNINGS" -gt "0" ]; then
+    echo "ACTION REQUIRED: $WARNINGS warning(s) found" >> "$EMAIL_CONTENT"
+    echo "" >> "$EMAIL_CONTENT"
+elif [ "$HARDENING_INDEX" -lt "70" ]; then
+    echo "Hardening score below threshold (70)" >> "$EMAIL_CONTENT"
+    echo "" >> "$EMAIL_CONTENT"
+fi
+
+# Append full output
+echo "=================================================================================" >> "$EMAIL_CONTENT"
+echo "FULL OUTPUT" >> "$EMAIL_CONTENT"
+echo "=================================================================================" >> "$EMAIL_CONTENT"
+echo "" >> "$EMAIL_CONTENT"
+cat "$SCAN_OUTPUT" >> "$EMAIL_CONTENT"
+
+# Determine subject
+if [ "$WARNINGS" -gt "0" ]; then
+    SUBJECT="[Lynis WARNING] $WARNINGS warnings - $SERVER_NAME"
+elif [ "$HARDENING_INDEX" -lt "60" ]; then
+    SUBJECT="[Lynis] Low score: $HARDENING_INDEX - $SERVER_NAME"
+else
+    SUBJECT="[Lynis] Score: $HARDENING_INDEX, $SUGGESTIONS suggestions - $SERVER_NAME"
+fi
+
+# Send email
+mail -s "$SUBJECT" -r "$LYNIS_EMAIL_FROM" "$ADMIN_EMAIL" < "$EMAIL_CONTENT"
+
+# Log metrics
+logger -t soc2-lynis "OPERATION_COMPLETE: service=lynis operation=security_scan warnings=$WARNINGS suggestions=$SUGGESTIONS hardening_index=$HARDENING_INDEX status=$SCAN_STATUS duration_seconds=$SCAN_DURATION"
+
+if [ "$WARNINGS" -gt "0" ]; then
+    logger -t soc2-security "SECURITY_FINDINGS: service=lynis warnings=$WARNINGS severity=high"
+fi
+
+# Cleanup old files
+find "$LOG_DIR" -name "lynis-output-*.txt" -mtime +30 -delete 2>/dev/null || true
+find "$LOG_DIR" -name "lynis-report-*.dat" -mtime +90 -delete 2>/dev/null || true
+find "$LOG_DIR" -name "lynis-email-*.txt" -mtime +7 -delete 2>/dev/null || true
+
+exit 0
