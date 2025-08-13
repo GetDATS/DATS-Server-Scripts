@@ -1,230 +1,119 @@
 #!/bin/bash
-set -euo pipefail
+# AIDE file integrity checker with automatic baseline refresh
 
-# AIDE file integrity checker with monitoring integration
-# Focuses on detecting critical system file changes with clear alerting
+set -u
+set -o pipefail
 
-# Load configuration from SOC2 config files
+# AIDE exit codes: 0=clean, 1-7=changes detected, 8+=errors
+
+# Load configuration
 source /usr/local/share/soc2-scripts/config/common.conf
-source /usr/local/share/soc2-scripts/config/aide-check.conf
 
-LOG_FILE="$LOG_DIR/aide-check.log"
+# Set up variables
+LOG_DIR="/var/log/aide"
+LOG_FILE="$LOG_DIR/aide-$(date +%Y%m%d-%H%M%S).log"
+ADMIN_EMAIL="${ADMIN_EMAIL:-sysadmin@getdats.com}"
+AIDE_EMAIL_FROM="aide+${SERVER_NAME}@${EMAIL_DOMAIN}"
 
-# Structured logging function for monitoring integration
-log_message() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
-    # Use consistent tag for syslog routing
-    logger -t soc2-aide "$1"
-}
-
-# Log structured metrics for monitoring
-log_metrics() {
-    local total_changes=$1
-    local critical_changes=$2
-    local status=$3
-    local operation_duration=${4:-0}
-
-    # Structured log entry for monitoring system
-    logger -t soc2-aide "OPERATION_COMPLETE: service=aide operation=integrity_check total_changes=$total_changes critical_changes=$critical_changes status=$status duration_seconds=$operation_duration"
-}
+mkdir -p "$LOG_DIR"
 
 # Check if AIDE is properly set up
 if [ ! -f "/var/lib/aide/aide.db" ]; then
-    log_message "ERROR: AIDE database missing - run 'aide --init' first"
-    logger -t soc2-aide "OPERATION_COMPLETE: service=aide operation=integrity_check status=$STATUS_ERROR error=database_missing"
-    echo "AIDE database is missing on $(hostname). Run 'sudo aide --init' to initialize." | mail -s "[SECURITY ERROR] AIDE Database Missing" -r "$AIDE_EMAIL_FROM" "$ADMIN_EMAIL"
+    echo "ERROR: AIDE database missing - run 'aide --init' first" | \
+        mail -s "[AIDE ERROR] Database missing - $(hostname)" -r "$AIDE_EMAIL_FROM" "$ADMIN_EMAIL"
+    logger -t soc2-aide "CHECK_FAILED: error=database_missing status=$STATUS_ERROR"
     exit 1
 fi
 
-log_message "Starting AIDE file integrity check"
-CHECK_START=$(date +%s)
-
 # Run AIDE check
-AIDE_RESULT=$(mktemp)
-if aide --check --config=/etc/aide/aide.conf > "$AIDE_RESULT" 2>&1; then
-    AIDE_STATUS="$STATUS_SUCCESS"
-    CHANGES_FOUND=0
-else
-    AIDE_EXIT_CODE=$?
-    if [ "$AIDE_EXIT_CODE" -eq 1 ]; then
-        # Exit code 1 means changes were detected (normal)
-        AIDE_STATUS="$STATUS_WARNING"
-        CHANGES_FOUND=1
+echo "Starting AIDE check at $(date)" > "$LOG_FILE"
+echo "----------------------------------------" >> "$LOG_FILE"
+aide --check --config=/etc/aide/aide.conf >> "$LOG_FILE" 2>&1
+CHANGES=$?
+
+echo "AIDE exit code: $CHANGES" >> "$LOG_FILE"
+
+# Initialize counters
+CHANGED=0
+ADDED=0
+REMOVED=0
+TOTAL=0
+
+# Determine status and subject line
+if [ $CHANGES -eq 0 ]; then
+    SUBJECT="[AIDE] Clean - $(hostname)"
+    STATUS="$STATUS_SUCCESS"
+elif [ $CHANGES -ge 1 ] && [ $CHANGES -le 7 ]; then
+    # Count changes for subject line
+    CHANGED=$(grep -c "^changed:" "$LOG_FILE" 2>/dev/null) || CHANGED=0
+    ADDED=$(grep -c "^added:" "$LOG_FILE" 2>/dev/null) || ADDED=0
+    REMOVED=$(grep -c "^removed:" "$LOG_FILE" 2>/dev/null) || REMOVED=0
+
+    TOTAL=$((CHANGED + ADDED + REMOVED))
+
+    if [ $TOTAL -gt 0 ]; then
+        SUBJECT="[AIDE] $TOTAL changes - $(hostname)"
     else
-        # Other exit codes indicate errors
-        AIDE_STATUS="$STATUS_ERROR"
-        CHANGES_FOUND=0
+        SUBJECT="[AIDE] Changes detected - $(hostname)"
     fi
-fi
-
-CHECK_END=$(date +%s)
-CHECK_DURATION=$((CHECK_END - CHECK_START))
-
-# Count total changes and critical changes
-if grep -qE "(Changed:|Added:|Removed:|changed|added|removed|differ)" "$AIDE_RESULT"; then
-    # Extract counts from AIDE's summary section - much more reliable
-    CHANGED_COUNT=$(grep "^  Changed entries:" "$AIDE_RESULT" | awk '{print $3}')
-    ADDED_COUNT=$(grep "^  Added entries:" "$AIDE_RESULT" | awk '{print $3}')
-    REMOVED_COUNT=$(grep "^  Removed entries:" "$AIDE_RESULT" | awk '{print $3}')
-
-    # Make sure we got numbers, default to 0 if not
-    CHANGED_COUNT=${CHANGED_COUNT:-0}
-    ADDED_COUNT=${ADDED_COUNT:-0}
-    REMOVED_COUNT=${REMOVED_COUNT:-0}
-
-    # Calculate total changes
-    TOTAL_CHANGES=$((CHANGED_COUNT + ADDED_COUNT + REMOVED_COUNT))
-
-    # For critical changes, we still need to look at the actual paths
-    # Check if any changed/added/removed entries are in critical directories
-    CRITICAL_CHANGES=$(grep -E "^[fdl] [=+<>].*(/etc/|/boot/|/usr/local/bin/)" "$AIDE_RESULT" | grep -c "" || echo "0")
+    STATUS="$STATUS_WARNING"
 else
-    # No change indicators found
-    TOTAL_CHANGES=0
-    CRITICAL_CHANGES=0
+    SUBJECT="[AIDE ERROR] Check failed - $(hostname)"
+    STATUS="$STATUS_ERROR"
 fi
 
-# Clean up the variables to ensure they're pure integers
-TOTAL_CHANGES=$(echo "$TOTAL_CHANGES" | tr -d '[:space:]')
-CRITICAL_CHANGES=$(echo "$CRITICAL_CHANGES" | tr -d '[:space:]')
+# Log metrics for Datadog
+logger -t soc2-aide "CHECK_COMPLETE: service=aide operation=integrity_check status=$STATUS exit_code=$CHANGES total_changes=$TOTAL"
 
-# Extra safety: ensure they're valid integers
-TOTAL_CHANGES=${TOTAL_CHANGES:-0}
-CRITICAL_CHANGES=${CRITICAL_CHANGES:-0}
+# Refresh database after changes detected
+if [ $CHANGES -ge 1 ] && [ $CHANGES -le 7 ]; then
+    echo "" >> "$LOG_FILE"
+    echo "----------------------------------------" >> "$LOG_FILE"
+    echo "Database refresh triggered (exit code $CHANGES indicates changes)" >> "$LOG_FILE"
+    echo "Refreshing database at $(date)" >> "$LOG_FILE"
 
-# Log structured metrics for monitoring
-log_metrics "$TOTAL_CHANGES" "$CRITICAL_CHANGES" "$AIDE_STATUS" "$CHECK_DURATION"
-
-# Handle results based on what we found
-if [ "$CRITICAL_CHANGES" -gt 0 ]; then
-    log_message "CRITICAL: $CRITICAL_CHANGES critical system files changed"
-
-    # Log detailed changes to secure log for investigation
-    echo "=== CRITICAL CHANGES $(date) ===" >> "$LOG_FILE"
-    grep -E "^f[+\.-].*/etc/|^f[+\.-].*/boot/|^f[+\.-].*/usr/local/bin/" "$AIDE_RESULT" >> "$LOG_FILE"
-    echo "=== END CRITICAL CHANGES ===" >> "$LOG_FILE"
-
-    # Log security events for monitoring
-    logger -t soc2-security "INTEGRITY_VIOLATION: service=aide critical_changes=$CRITICAL_CHANGES total_changes=$TOTAL_CHANGES severity=critical"
-
-    {
-        echo "AIDE detected $CRITICAL_CHANGES critical system file changes on $(hostname)"
-        echo ""
-        echo "Change Summary:"
-        echo "- Critical changes: $CRITICAL_CHANGES (requires immediate attention)"
-        echo "- Total changes: $TOTAL_CHANGES"
-        echo "- Check duration: ${CHECK_DURATION} seconds"
-        echo "- Status: REQUIRES IMMEDIATE INVESTIGATION"
-        echo ""
-        echo "Security Actions Required:"
-        echo "1. Review detailed change log: $LOG_FILE"
-        echo "2. Verify changes are authorized"
-        echo "3. Investigate potential security incidents"
-        echo ""
-        echo "Critical system directories affected - detailed analysis required."
-        echo "Change details have been logged securely for investigation."
-    } | mail -s "[SECURITY CRITICAL] AIDE - $CRITICAL_CHANGES critical system changes - $(hostname)" -r "$AIDE_EMAIL_FROM" "$ADMIN_EMAIL"
-
-elif [ "$TOTAL_CHANGES" -gt 0 ]; then
-    log_message "Changes detected: $TOTAL_CHANGES files changed (no critical system files)"
-
-    # Log non-critical changes to secure log
-    echo "=== NON-CRITICAL CHANGES $(date) ===" >> "$LOG_FILE"
-    head -50 "$AIDE_RESULT" >> "$LOG_FILE"
-    echo "=== END NON-CRITICAL CHANGES ===" >> "$LOG_FILE"
-
-    # Determine change scale for reporting
-    if [ "$TOTAL_CHANGES" -gt 100 ]; then
-        CHANGE_SCALE="large"
-    elif [ "$TOTAL_CHANGES" -gt 20 ]; then
-        CHANGE_SCALE="medium"
-    else
-        CHANGE_SCALE="small"
+    # Archive on Sundays for SOC 2
+    if [ $(date +%u) -eq 7 ]; then
+        DB_ARCHIVE="/var/lib/aide/archive"
+        mkdir -p "$DB_ARCHIVE"
+        if cp /var/lib/aide/aide.db "$DB_ARCHIVE/aide.db_$(date +%Y%m%d)" 2>/dev/null; then
+            echo "Database archived to $DB_ARCHIVE/aide.db_$(date +%Y%m%d)" >> "$LOG_FILE"
+        fi
+        find "$DB_ARCHIVE" -name "aide.db_*" -mtime +84 -delete 2>/dev/null || true
     fi
-
-    {
-        echo "AIDE detected $TOTAL_CHANGES file changes on $(hostname)"
-        echo ""
-        echo "Change Summary:"
-        echo "- Total changes: $CHANGE_SCALE scale ($TOTAL_CHANGES files)"
-        echo "- Critical changes: 0 (no system files affected)"
-        echo "- Check duration: ${CHECK_DURATION} seconds"
-        echo "- Status: Normal operational changes"
-        echo ""
-        echo "No critical system files were affected."
-        echo "Detailed change analysis available in secure logs."
-        echo "This appears to be normal operational file activity."
-    } | mail -s "[AIDE] File Changes - $TOTAL_CHANGES changes - $(hostname)" -r "$AIDE_EMAIL_FROM" "$ADMIN_EMAIL"
-
-elif [ "$AIDE_STATUS" = "$STATUS_ERROR" ]; then
-    log_message "ERROR: AIDE check failed with exit code $AIDE_EXIT_CODE"
-
-    # Log error details to secure log
-    echo "=== AIDE ERROR $(date) ===" >> "$LOG_FILE"
-    cat "$AIDE_RESULT" >> "$LOG_FILE"
-    echo "=== END AIDE ERROR ===" >> "$LOG_FILE"
-
-    {
-        echo "AIDE integrity check failed on $(hostname)"
-        echo ""
-        echo "Error Summary:"
-        echo "- Exit code: $AIDE_EXIT_CODE"
-        echo "- Check duration: ${CHECK_DURATION} seconds"
-        echo "- Status: System error - integrity checking disabled"
-        echo ""
-        echo "Security Actions Required:"
-        echo "1. Review error details: $LOG_FILE"
-        echo "2. Restore AIDE functionality immediately"
-        echo "3. Verify system integrity through alternative means"
-        echo ""
-        echo "File integrity monitoring is currently offline."
-    } | mail -s "[SECURITY ERROR] AIDE Check Failed - $(hostname)" -r "$AIDE_EMAIL_FROM" "$ADMIN_EMAIL"
-
-else
-    log_message "Integrity check completed - no changes detected"
-    {
-        echo "AIDE integrity check completed successfully on $(hostname)"
-        echo ""
-        echo "Check Results:"
-        echo "- Status: Clean (no file changes detected)"
-        echo "- Files monitored: Active"
-        echo "- Check duration: ${CHECK_DURATION} seconds"
-        echo "- Database age: $(stat -c %Y /var/lib/aide/aide.db | xargs -I {} date -d @{} '+%Y-%m-%d')"
-        echo ""
-        echo "This is a routine integrity check confirmation."
-        echo "Historical trends available in monitoring dashboard."
-    } | mail -s "[AIDE] Integrity Check - Clean - $(hostname)" -r "$AIDE_EMAIL_FROM" "$ADMIN_EMAIL"
-fi
-
-# Update database weekly (Sundays)
-if [ "$(date +%u)" -eq 7 ] && [ "$AIDE_STATUS" = "$STATUS_SUCCESS" ]; then
-    log_message "Performing weekly database update"
-
-    # Create archive directory if it doesn't exist
-    mkdir -p "$DB_ARCHIVE"
-
-    # Simple backup before update
-    DATE_STAMP=$(date +%Y%m%d)
-    if cp /var/lib/aide/aide.db "$DB_ARCHIVE/aide.db_$DATE_STAMP" 2>/dev/null; then
-        log_message "Database backed up to $DB_ARCHIVE/aide.db_$DATE_STAMP"
-    fi
-
-    # Clean old backups (keep 12 weeks for SOC 2 comfort)
-    find "$DB_ARCHIVE" -name "aide.db_*" -mtime +84 -delete 2>/dev/null || true
 
     # Update database
-    if aide --update --config=/etc/aide/aide.conf >/dev/null 2>&1; then
-        cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db
-        rm -f /var/lib/aide/aide.db.new
-        log_message "Database updated successfully"
-        logger -t soc2-aide "OPERATION_COMPLETE: service=aide operation=database_update status=$STATUS_SUCCESS"
+    echo "Running: aide --update --config=/etc/aide/aide.conf" >> "$LOG_FILE"
+    aide --update --config=/etc/aide/aide.conf >> "$LOG_FILE" 2>&1
+    UPDATE_EXIT=$?
+
+    if [ $UPDATE_EXIT -ge 0 ] && [ $UPDATE_EXIT -le 7 ]; then
+        echo "aide --update completed (exit code $UPDATE_EXIT)" >> "$LOG_FILE"
+        if [ -f /var/lib/aide/aide.db.new ]; then
+            echo "New database exists, moving into place" >> "$LOG_FILE"
+            if mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db 2>/dev/null; then
+                echo "Database successfully refreshed" >> "$LOG_FILE"
+                logger -t soc2-aide "DATABASE_REFRESHED: status=$STATUS_SUCCESS"
+            else
+                echo "ERROR: Failed to move new database into place" >> "$LOG_FILE"
+                logger -t soc2-aide "DATABASE_REFRESH_FAILED: status=$STATUS_ERROR error=mv_failed"
+            fi
+        else
+            echo "ERROR: aide --update didn't create aide.db.new" >> "$LOG_FILE"
+            logger -t soc2-aide "DATABASE_REFRESH_FAILED: status=$STATUS_ERROR error=no_new_db"
+        fi
     else
-        log_message "ERROR: Database update failed"
-        logger -t soc2-aide "OPERATION_COMPLETE: service=aide operation=database_update status=$STATUS_ERROR"
+        echo "ERROR: aide --update command failed with exit code $UPDATE_EXIT" >> "$LOG_FILE"
+        logger -t soc2-aide "DATABASE_REFRESH_FAILED: status=$STATUS_ERROR error=update_failed exit_code=$UPDATE_EXIT"
     fi
+else
+    echo "No database refresh needed (exit code $CHANGES)" >> "$LOG_FILE"
 fi
 
-# Clean up
-rm -f "$AIDE_RESULT"
+# Email the results
+if ! mail -s "$SUBJECT" -r "$AIDE_EMAIL_FROM" "$ADMIN_EMAIL" < "$LOG_FILE"; then
+    logger -t soc2-aide "EMAIL_FAILED: subject=\"$SUBJECT\" status=$STATUS_ERROR"
+    echo "ERROR: Failed to send email notification" >&2
+fi
 
-log_message "AIDE check completed"
+exit 0
