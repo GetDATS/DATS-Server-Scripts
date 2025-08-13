@@ -8,12 +8,12 @@ set -o pipefail
 
 # Load configuration
 source /usr/local/share/soc2-scripts/config/common.conf
+source /usr/local/share/soc2-scripts/config/aide-check.conf
 
 # Set up variables
 LOG_DIR="/var/log/aide"
 LOG_FILE="$LOG_DIR/aide-$(date +%Y%m%d-%H%M%S).log"
 ADMIN_EMAIL="${ADMIN_EMAIL:-sysadmin@getdats.com}"
-AIDE_EMAIL_FROM="aide+${SERVER_NAME}@${EMAIL_DOMAIN}"
 
 mkdir -p "$LOG_DIR"
 
@@ -74,7 +74,6 @@ if [ $CHANGES -ge 1 ] && [ $CHANGES -le 7 ]; then
 
     # Archive on Sundays for SOC 2
     if [ $(date +%u) -eq 7 ]; then
-        DB_ARCHIVE="/var/lib/aide/archive"
         mkdir -p "$DB_ARCHIVE"
         if cp /var/lib/aide/aide.db "$DB_ARCHIVE/aide.db_$(date +%Y%m%d)" 2>/dev/null; then
             echo "Database archived to $DB_ARCHIVE/aide.db_$(date +%Y%m%d)" >> "$LOG_FILE"
