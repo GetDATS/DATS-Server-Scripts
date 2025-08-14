@@ -266,17 +266,14 @@ if [ "$DAY_OF_WEEK" = "1" ] || [ "$BACKUP_STATUS" = "FAILED" ]; then
         if [ "$UPLOAD_SUCCESS" = true ] && [ "$VERIFY_SUCCESS" = true ]; then
             echo "Recovery Instructions:"
             echo "1. Download: aws s3 cp $S3_PATH backup.tar.bz2.enc"
-            if [ "$ENCRYPTION_USED" = "Yes" ]; then
-                echo "2. Decrypt: openssl enc -aes-256-cbc -d -pbkdf2 -in backup.tar.bz2.enc -out backup.tar.bz2 -pass file:/root/.backup-encryption-key"
-                echo "3. Extract: pbzip2 -dvc backup.tar.bz2 | tar -xv"
-            else
-                echo "2. Extract: pbzip2 -dvc backup.tar.bz2 | tar -xv"
-            fi
-            echo "3. Prepare: mariadb-backup --prepare --target-dir=backup-$DATE_STAMP"
-            echo "4. Stop MariaDB: systemctl stop mariadb"
-            echo "5. Restore: mariadb-backup --copy-back --target-dir=backup-$DATE_STAMP"
-            echo "6. Fix permissions: chown -R mysql:mysql /var/lib/mysql"
-            echo "7. Start MariaDB: systemctl start mariadb"
+            echo "2. Decrypt: openssl enc -aes-256-cbc -d -pbkdf2 -in backup.tar.bz2.enc -out backup.tar.bz2 -pass file:/root/.backup-encryption-key"
+            echo "3. Extract: pbzip2 -dv -p16 -m1000 backup.tar.bz2"
+            echo "4. Inflate: tar -xvf backup.tar"
+            echo "5. Prepare: mariadb-backup --prepare --target-dir=backup-$DATE_STAMP"
+            echo "6. Stop MariaDB: systemctl stop mariadb"
+            echo "7. Restore: mariadb-backup --copy-back --target-dir=backup-$DATE_STAMP"
+            echo "8. Fix permissions: chown -R mysql:mysql /var/lib/mysql"
+            echo "9. Start MariaDB: systemctl start mariadb"
         else
             echo "⚠️  ACTION REQUIRED:"
             echo "Backup did not complete successfully. Please investigate immediately."
