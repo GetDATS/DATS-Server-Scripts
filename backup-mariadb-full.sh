@@ -277,6 +277,7 @@ if [ "$DAY_OF_WEEK" = "1" ] || [ "$BACKUP_STATUS" = "FAILED" ]; then
             echo "10. Restore: mariadb-backup --copy-back --target-dir=backup-$DATE_STAMP"
             echo "11. Fix permissions: chown -R mysql:mysql /var/lib/mysql"
             echo "12. Start MariaDB: sudo systemctl start mariadb"
+            echo "13. Start Monit: sudo systemctl start monit"
         else
             echo "⚠️  ACTION REQUIRED:"
             echo "Backup did not complete successfully. Please investigate immediately."
