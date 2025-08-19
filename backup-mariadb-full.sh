@@ -275,7 +275,7 @@ if [ "$DAY_OF_WEEK" = "1" ] || [ "$BACKUP_STATUS" = "FAILED" ]; then
             echo "8. Stop MariaDB: sudo systemctl stop mariadb"
             echo "9. Delete existing database files: sudo rm -rf /var/lib/mysql/*"
             echo "10. Restore: mariadb-backup --copy-back --target-dir=backup-$DATE_STAMP"
-            echo "11. Fix permissions: chown -R mysql:mysql /var/lib/mysql"
+            echo "11. Fix permissions: sudo chown -R mysql:mysql /var/lib/mysql"
             echo "12. Start MariaDB: sudo systemctl start mariadb"
             echo "13. Start Monit: sudo systemctl start monit"
         else
