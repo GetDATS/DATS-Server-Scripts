@@ -55,8 +55,26 @@ for FILE_PATH in "${FILE_BACKUP_PATHS[@]}"; do
     # Capture sync output
     SYNC_OUTPUT=$(mktemp)
 
-    if aws s3 sync "$FILE_PATH" "$S3_PATH" 2>&1 | tee "$SYNC_OUTPUT"; then
+    SYNC_SUCCESS=false
 
+    if aws s3 sync "$FILE_PATH" "$S3_PATH" 2>&1 | tee "$SYNC_OUTPUT"; then
+        SYNC_SUCCESS=true
+    else
+        # Retry once after 30 seconds - handles transient file-change races
+        log_message "WARNING: First sync attempt failed for $FILE_PATH, retrying in 30s"
+        sleep 30
+        rm -f "$SYNC_OUTPUT"
+        SYNC_OUTPUT=$(mktemp)
+        if aws s3 sync "$FILE_PATH" "$S3_PATH" 2>&1 | tee "$SYNC_OUTPUT"; then
+            SYNC_SUCCESS=true
+            log_message "  Retry succeeded"
+        else
+            log_message "ERROR: Failed to sync $FILE_PATH after retry"
+            FAILED_PATHS+=("$FILE_PATH")
+        fi
+    fi
+
+    if [ "$SYNC_SUCCESS" = true ]; then
         # Count what was synced
         FILES_UPLOADED=0
         if [ -f "$SYNC_OUTPUT" ]; then
@@ -72,9 +90,6 @@ for FILE_PATH in "${FILE_BACKUP_PATHS[@]}"; do
         if [ "$FILES_UPLOADED" -gt 0 ]; then
             log_message "  Uploaded $FILES_UPLOADED files"
         fi
-    else
-        log_message "ERROR: Failed to sync $FILE_PATH"
-        FAILED_PATHS+=("$FILE_PATH")
     fi
 
     rm -f "$SYNC_OUTPUT"
@@ -90,16 +105,21 @@ fi
 
 logger -t soc2-file-backup "OPERATION_COMPLETE: service=backup operation=file_sync paths_synced=$TOTAL_PATHS_SYNCED files_synced=$TOTAL_FILES_SYNCED status=$STATUS duration_seconds=$BACKUP_DURATION"
 
-# Alert on failures
+# Alert on failures - only email if 3+ paths fail to reduce noise from
+# transient file-change races (e.g. user uploading during sync)
 if [ ${#FAILED_PATHS[@]} -gt 0 ]; then
-    {
-        echo "File backup completed with errors on $(hostname)"
-        echo ""
-        echo "Failed paths:"
-        printf '%s\n' "${FAILED_PATHS[@]}" | sed 's/^/  - /'
-        echo ""
-        echo "Check $LOG_FILE for details"
-    } | mail -s "[BACKUP ERROR] File Sync - Partial Failure" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+    log_message "WARNING: ${#FAILED_PATHS[@]} path(s) failed after retry: ${FAILED_PATHS[*]}"
+
+    if [ ${#FAILED_PATHS[@]} -ge 3 ]; then
+        {
+            echo "File backup completed with errors on $(hostname)"
+            echo ""
+            echo "Failed paths (${#FAILED_PATHS[@]} failures - each retried once):"
+            printf '%s\n' "${FAILED_PATHS[@]}" | sed 's/^/  - /'
+            echo ""
+            echo "Check $LOG_FILE for details"
+        } | mail -s "[BACKUP ERROR] File Sync - Partial Failure" -r "$BACKUP_EMAIL_FROM" "$ADMIN_EMAIL"
+    fi
 fi
 
 # Daily summary at 8 AM
