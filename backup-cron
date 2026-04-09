@@ -1,7 +1,7 @@
 # MariaDB binary logs - every 15 minutes (low RPO)
 */15 * * * * root /usr/local/bin/backup-mariadb-binlog.sh >/dev/null 2>&1
 
-# File backup - every 15 minutes (low RPO)
+# File backup - every hour (changed from 15min to prevent overlap)
 0 * * * * root /usr/local/bin/backup-files.sh >/dev/null 2>&1
 
 # MariaDB full backup - 2:00 AM UTC daily (6:00 PM PST / 7:00 PM PDT)
