@@ -214,11 +214,20 @@ else
     VERIFY_SUCCESS=false
 fi
 
-# Step 6: Clean up old local backups (keep 7 days)
-log_message "Cleaning local backups older than $LOCAL_RETAIN_DAYS days"
-CLEANED_COUNT=$(find "$BACKUP_BASE_DIR" -name "mariadb-*.tar.bz2*" -mtime +$LOCAL_RETAIN_DAYS -print -delete 2>/dev/null | wc -l || echo "0")
-if [ "$CLEANED_COUNT" -gt 0 ]; then
-    log_message "Removed $CLEANED_COUNT old backup(s)"
+# Step 6: Clean up old local backups (keep newest $LOCAL_RETAIN_COUNT) - only after a verified S3 upload
+# S3 is the durable copy, so local files are just a fast-restore convenience. If the upload did not
+# verify, we keep ALL local backups as the fallback rather than pruning toward an unconfirmed S3 copy.
+if [ "$UPLOAD_SUCCESS" = true ] && [ "$VERIFY_SUCCESS" = true ]; then
+    log_message "Cleaning local backups, keeping newest $LOCAL_RETAIN_COUNT"
+    CLEANED_COUNT=0
+    while IFS= read -r OLD_BACKUP; do
+        if rm -f "$OLD_BACKUP"; then CLEANED_COUNT=$((CLEANED_COUNT + 1)); fi
+    done < <(find "$BACKUP_BASE_DIR" -maxdepth 1 -type f -name "mariadb-*.tar.bz2*" -printf '%T@\t%p\n' 2>/dev/null | sort -rn | tail -n +$((LOCAL_RETAIN_COUNT + 1)) | cut -f2-)
+    if [ "$CLEANED_COUNT" -gt 0 ]; then
+        log_message "Removed $CLEANED_COUNT old local backup(s), kept newest $LOCAL_RETAIN_COUNT"
+    fi
+else
+    log_message "WARNING: S3 upload not verified - retaining all local backups as fallback, skipping cleanup"
 fi
 
 # Count remaining local backups
@@ -259,7 +268,7 @@ if [ "$DAY_OF_WEEK" = "1" ] || [ "$BACKUP_STATUS" = "FAILED" ]; then
         echo "Storage:"
         echo "- S3 location: $S3_PATH"
         echo "- Local backups: $LOCAL_COUNT files, $LOCAL_TOTAL_SIZE total"
-        echo "- Local retention: $LOCAL_RETAIN_DAYS days"
+        echo "- Local retention: newest $LOCAL_RETAIN_COUNT backups"
         echo "- S3 retention: $S3_RETAIN_MARIADB_FULL days"
         echo ""
 
