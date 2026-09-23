@@ -94,30 +94,40 @@ preflight_checks
 # Initialize state tracking
 initialize_state
 
-# Find rotated logs (simpler approach - look for common rotation patterns)
+# State key for a log file: its full path without any .gz suffix, so a rotation
+# is archived once even after logrotate later compresses it, and same-named logs
+# in different directories (apache2/error.log vs mysql/error.log) are tracked
+# separately. Numbered rotations (*.1) reuse the same name every time, so their
+# key also carries the file's modification time.
+state_key() {
+    case "$1" in
+        *.1|*.1.gz) echo "${1%.gz}@$(stat -c %Y "$1")" ;;
+        *)          echo "${1%.gz}" ;;
+    esac
+}
+
+# Find rotated logs not yet archived. Any date-stamped file qualifies, not just
+# yesterday's: a day this job fails (AWS outage, host down) is caught up on the
+# next run instead of being skipped for good. Date-stamped means a dateext
+# rotation (dpkg.log-20260923) or a per-run log (aide-20260923-110000.log).
 log_message "Scanning for rotated logs"
 
-# Build list of rotated logs, excluding already archived ones
+TODAY=$(date +%Y%m%d)
 ROTATED_LOGS=""
-for pattern in "*.1" "*.1.gz" "*-$(date -d yesterday +%Y%m%d)*" "*-$(date -d yesterday +%Y%m%d)*.gz"; do
-    while IFS= read -r -d '' logfile; do
-        # Get just the filename
-        filename=$(basename "$logfile")
+while IFS= read -r -d '' logfile; do
+    # Skip if already archived
+    if grep -qxF "$(state_key "$logfile")" "$LOG_ARCHIVE_STATE_FILE" 2>/dev/null; then
+        continue
+    fi
 
-        # Skip if already archived
-        if grep -q "^${filename}$" "$LOG_ARCHIVE_STATE_FILE" 2>/dev/null; then
-            continue
-        fi
+    # Skip files stamped today - they may still be written to; the next run takes them
+    if [[ "$(basename "$logfile")" == *"-$TODAY"* ]]; then
+        continue
+    fi
 
-        # Skip if it's today's active log
-        if [[ "$filename" =~ $(date +%Y%m%d) ]] && [ "$(date +%Y%m%d)" != "$(date -d yesterday +%Y%m%d)" ]; then
-            continue
-        fi
-
-        # Add to our list
-        ROTATED_LOGS="${ROTATED_LOGS}${logfile}"$'\n'
-    done < <(find /var/log -type f -name "$pattern" -print0 2>/dev/null)
-done
+    # Add to our list
+    ROTATED_LOGS="${ROTATED_LOGS}${logfile}"$'\n'
+done < <(find /var/log -path /var/log/journal -prune -o -type f \( -name "*-20[0-9][0-9][01][0-9][0-3][0-9]*" -o -name "*.1" -o -name "*.1.gz" \) -print0 2>/dev/null)
 
 # Remove empty lines and count
 ROTATED_LOGS=$(echo "$ROTATED_LOGS" | grep -v "^$" || true)
@@ -181,7 +191,7 @@ if aws s3 cp "$ARCHIVE_PATH" "$S3_PATH" --storage-class GLACIER_IR; then
 
         # Mark all files as archived
         echo "$ROTATED_LOGS" | while IFS= read -r logfile; do
-            [ -n "$logfile" ] && echo "$(basename "$logfile")" >> "$LOG_ARCHIVE_STATE_FILE"
+            [ -n "$logfile" ] && state_key "$logfile" >> "$LOG_ARCHIVE_STATE_FILE"
         done
 
         # Log success metrics
@@ -206,8 +216,11 @@ if [ -f "$LOG_ARCHIVE_STATE_FILE" ] && [ -s "$LOG_ARCHIVE_STATE_FILE" ]; then
     CLEANED_COUNT=0
 
     while IFS= read -r archived_log; do
-        # Check if file still exists anywhere in /var/log
-        if find /var/log -name "$archived_log" -type f 2>/dev/null | grep -q .; then
+        # Keep the entry while the file still exists, compressed or not. Entries
+        # from before state keys were full paths are bare filenames; they fail
+        # this test and are dropped.
+        archived_path="${archived_log%@*}"
+        if [ -e "$archived_path" ] || [ -e "$archived_path.gz" ]; then
             echo "$archived_log" >> "$TEMP_STATE"
         else
             CLEANED_COUNT=$((CLEANED_COUNT + 1))
