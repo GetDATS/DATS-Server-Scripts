@@ -93,7 +93,7 @@ request_slowlog_timeout = 10s
 access.log = /var/log/php/fpm-access.log
 
 ; Security - terminate long-running requests
-request_terminate_timeout = 60s
+request_terminate_timeout = 300s
 EOF
 
 # Also output a summary for the administrator
