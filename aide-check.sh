@@ -11,8 +11,13 @@ source /usr/local/share/soc2-scripts/config/common.conf
 source /usr/local/share/soc2-scripts/config/aide-check.conf
 
 # Set up variables
-LOG_DIR="/var/log/aide"
-LOG_FILE="$LOG_DIR/aide-$(date +%Y%m%d-%H%M%S).log"
+# LOG_DIR comes from common.conf. Every run appends to SUMMARY_LOG, which
+# logrotate rotates and the log shipper reads. This run's own output goes to a
+# private temporary file first, so the email and the change counts cover one
+# run only.
+SUMMARY_LOG="$LOG_DIR/aide-check.log"
+LOG_FILE="$(mktemp)"
+trap 'rm -f "$LOG_FILE"' EXIT
 ADMIN_EMAIL="${ADMIN_EMAIL:-sysadmin@getdats.com}"
 
 mkdir -p "$LOG_DIR"
@@ -108,6 +113,12 @@ if [ $CHANGES -ge 1 ] && [ $CHANGES -le 7 ]; then
 else
     echo "No database refresh needed (exit code $CHANGES)" >> "$LOG_FILE"
 fi
+
+# Append this run to the summary log, readable by the log shipper through the adm group
+cat "$LOG_FILE" >> "$SUMMARY_LOG"
+echo "" >> "$SUMMARY_LOG"
+chown root:adm "$SUMMARY_LOG"
+chmod 0640 "$SUMMARY_LOG"
 
 # Email the results
 if ! mail -s "$SUBJECT" -r "$AIDE_EMAIL_FROM" "$ADMIN_EMAIL" < "$LOG_FILE"; then
