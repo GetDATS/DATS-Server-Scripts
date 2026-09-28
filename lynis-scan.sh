@@ -14,6 +14,9 @@ EMAIL_CONTENT="$LOG_DIR/lynis-email-$TIME_STAMP.txt"
 
 mkdir -p "$LOG_DIR"
 
+# Scan files from earlier runs go to the adm group too, or the log shipper cannot open them
+find "$LOG_DIR" -maxdepth 1 -type f -name 'lynis-*' -exec chown root:adm {} + -exec chmod 0640 {} +
+
 # Initialize scan log
 cat > "$SCAN_OUTPUT" << EOF
 ================================================================================
