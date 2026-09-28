@@ -49,10 +49,14 @@ if [ $CHANGES -eq 0 ]; then
     SUBJECT="[AIDE] Clean - $(hostname)"
     STATUS="$STATUS_SUCCESS"
 elif [ $CHANGES -ge 1 ] && [ $CHANGES -le 7 ]; then
-    # Count changes for subject line
-    CHANGED=$(grep -c "^changed:" "$LOG_FILE" 2>/dev/null) || CHANGED=0
-    ADDED=$(grep -c "^added:" "$LOG_FILE" 2>/dev/null) || ADDED=0
-    REMOVED=$(grep -c "^removed:" "$LOG_FILE" 2>/dev/null) || REMOVED=0
+    # Count changes for the subject line from AIDE's summary, one line per kind:
+    #   Added entries:      17
+    CHANGED=$(grep -m1 -E '^[[:space:]]*Changed entries:' "$LOG_FILE" 2>/dev/null | awk '{print $NF}') || CHANGED=0
+    ADDED=$(grep -m1 -E '^[[:space:]]*Added entries:' "$LOG_FILE" 2>/dev/null | awk '{print $NF}') || ADDED=0
+    REMOVED=$(grep -m1 -E '^[[:space:]]*Removed entries:' "$LOG_FILE" 2>/dev/null | awk '{print $NF}') || REMOVED=0
+    [[ "$CHANGED" =~ ^[0-9]+$ ]] || CHANGED=0
+    [[ "$ADDED" =~ ^[0-9]+$ ]] || ADDED=0
+    [[ "$REMOVED" =~ ^[0-9]+$ ]] || REMOVED=0
 
     TOTAL=$((CHANGED + ADDED + REMOVED))
 
