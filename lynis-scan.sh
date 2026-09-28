@@ -22,6 +22,9 @@ $(date '+%Y-%m-%d %H:%M:%S')
 ================================================================================
 
 EOF
+# The log shipper reads the scan files through the adm group
+chown root:adm "$SCAN_OUTPUT"
+chmod 0640 "$SCAN_OUTPUT"
 
 SCAN_START=$(date +%s)
 
@@ -38,6 +41,10 @@ if lynis audit system \
 else
     SCAN_STATUS="error"
     SCAN_EXIT=$?
+fi
+if [ -f "$REPORT_DATA" ]; then
+    chown root:adm "$REPORT_DATA"
+    chmod 0640 "$REPORT_DATA"
 fi
 
 # Strip terminal control codes
@@ -124,6 +131,8 @@ Duration:        ${SCAN_DURATION} seconds
 Date:            $(date '+%Y-%m-%d %H:%M:%S')
 
 EOF
+chown root:adm "$EMAIL_CONTENT"
+chmod 0640 "$EMAIL_CONTENT"
 
 if [ "$WARNINGS" -gt "0" ]; then
     echo "ACTION REQUIRED: $WARNINGS warning(s) found" >> "$EMAIL_CONTENT"

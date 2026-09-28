@@ -10,6 +10,11 @@ source /usr/local/share/soc2-scripts/config/clamav-scan.conf
 
 LOG_FILE="$LOG_DIR/clamav-daily-scan.log"
 
+# The log shipper reads this file through the adm group
+touch "$LOG_FILE"
+chown root:adm "$LOG_FILE"
+chmod 0640 "$LOG_FILE"
+
 # Datadog-friendly logging function
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
