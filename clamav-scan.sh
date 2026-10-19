@@ -47,6 +47,9 @@ SCAN_START=$(date +%s)
 TOTAL_FILES_SCANNED=0
 TOTAL_INFECTED_COUNT=0
 SCAN_STATUS="$STATUS_SUCCESS"
+# Set only when recent uploads exist; the threat-details block and the cleanup test them either way
+UPLOAD_SCAN_RESULT=""
+UPLOAD_SCAN_LIST=""
 
 # Function to parse ClamAV output and update counters
 parse_scan_output() {
@@ -66,12 +69,16 @@ log_message "Scanning system directories"
 SYSTEM_SCAN_RESULT=$(mktemp)
 
 if [ ${#SYSTEM_SCAN_DIRS[@]} -gt 0 ]; then
-    if clamscan --recursive --infected --log="$SYSTEM_SCAN_RESULT" "${SYSTEM_SCAN_DIRS[@]}" 2>&1; then
-        log_message "System directory scan completed successfully"
-    else
-        SCAN_STATUS="$STATUS_WARNING"
-        log_message "System directory scan found threats"
-    fi
+    # clamscan exits 1 on a detection and 2 on an error; only the first is a threat
+    SYSTEM_SCAN_RC=0
+    clamscan --recursive --infected --log="$SYSTEM_SCAN_RESULT" "${SYSTEM_SCAN_DIRS[@]}" 2>&1 || SYSTEM_SCAN_RC=$?
+    case "$SYSTEM_SCAN_RC" in
+        0)  log_message "System directory scan completed successfully" ;;
+        1)  SCAN_STATUS="$STATUS_WARNING"
+            log_message "System directory scan found threats" ;;
+        *)  SCAN_STATUS="$STATUS_ERROR"
+            log_message "ERROR: System directory scan failed (clamscan exit $SYSTEM_SCAN_RC)" ;;
+    esac
 
     # Parse results
     read -r scanned infected <<< "$(parse_scan_output "$SYSTEM_SCAN_RESULT")"
@@ -93,12 +100,13 @@ for upload_dir in "${UPLOAD_SCAN_DIRS[@]}"; do
     for dir in $upload_dir; do
         if [ -d "$dir" ]; then
             log_message "Finding recent files in: $dir"
-            # Find files modified in last N days, within size limits
+            # Find files modified in last N days, within size limits;
+            # modification time first, so the cap below keeps the newest
             find "$dir" -type f \
                 -mtime -${CLAMAV_RECENT_DAYS} \
                 -size +1c \
                 -size -${CLAMAV_MAX_FILESIZE} \
-                -print0 >> "$RECENT_FILES_LIST"
+                -printf '%T@\t%p\0' >> "$RECENT_FILES_LIST"
         fi
     done
 done
@@ -110,21 +118,35 @@ log_message "Found $RECENT_FILE_COUNT recent files in upload directories"
 # Scan recent files if any were found
 if [ "$RECENT_FILE_COUNT" -gt 0 ]; then
     UPLOAD_SCAN_RESULT=$(mktemp)
+    UPLOAD_SCAN_LIST=$(mktemp)
 
-    # Use clamdscan with file list for better performance
-    # Limit to CLAMAV_MAX_FILES to prevent runaway scans
-    if tr '\0' '\n' < "$RECENT_FILES_LIST" | head -n ${CLAMAV_MAX_FILES} | \
-        xargs -d '\n' clamdscan --infected --multiscan --fdpass 2>&1 | \
-        tee "$UPLOAD_SCAN_RESULT"; then
-        log_message "Upload directory scan completed"
-    else
+    # Newest first, then at most CLAMAV_MAX_FILES of them. The cap is cut from a
+    # file by head, never inside the scan pipeline: a reader that closes a pipe
+    # early kills its writer with SIGPIPE, and pipefail reports that as a failed
+    # scan on every run that lists more files than the cap.
+    sort -z -t $'\t' -k1,1rn -o "$RECENT_FILES_LIST" "$RECENT_FILES_LIST"
+    head -z -n "$CLAMAV_MAX_FILES" "$RECENT_FILES_LIST" | cut -z -f2- > "$UPLOAD_SCAN_LIST"
+
+    # clamdscan through xargs: the exit status says only that some invocation
+    # failed, a detection and an error alike, so the outcome is read from the
+    # output, where a detection is a FOUND line and an error an ERROR line
+    UPLOAD_SCAN_RC=0
+    xargs -0 clamdscan --infected --multiscan --fdpass < "$UPLOAD_SCAN_LIST" > "$UPLOAD_SCAN_RESULT" 2>&1 || UPLOAD_SCAN_RC=$?
+
+    # grep -c prints 0 and exits 1 on a clean scan; the count must stay one number
+    infected_files=$(grep -c ' FOUND$' "$UPLOAD_SCAN_RESULT" || true)
+    scan_errors=$(grep -c 'ERROR$' "$UPLOAD_SCAN_RESULT" || true)
+    scanned_files=$([ "$RECENT_FILE_COUNT" -gt "$CLAMAV_MAX_FILES" ] && echo "$CLAMAV_MAX_FILES" || echo "$RECENT_FILE_COUNT")
+
+    if [ "$infected_files" -gt 0 ]; then
         SCAN_STATUS="$STATUS_WARNING"
         log_message "Upload directory scan found threats"
+    elif [ "$UPLOAD_SCAN_RC" -ne 0 ]; then
+        SCAN_STATUS="$STATUS_ERROR"
+        log_message "ERROR: Upload directory scan failed (xargs exit $UPLOAD_SCAN_RC, $scan_errors files in error)"
+    else
+        log_message "Upload directory scan completed"
     fi
-
-    # Count results from clamdscan output
-    infected_files=$(grep -c "FOUND" "$UPLOAD_SCAN_RESULT" || echo "0")
-    scanned_files=$([ "$RECENT_FILE_COUNT" -gt "$CLAMAV_MAX_FILES" ] && echo "$CLAMAV_MAX_FILES" || echo "$RECENT_FILE_COUNT")
 
     TOTAL_FILES_SCANNED=$((TOTAL_FILES_SCANNED + scanned_files))
     TOTAL_INFECTED_COUNT=$((TOTAL_INFECTED_COUNT + infected_files))
@@ -133,21 +155,18 @@ if [ "$RECENT_FILE_COUNT" -gt 0 ]; then
 
     # If we hit the file limit, note it
     if [ "$RECENT_FILE_COUNT" -gt "$CLAMAV_MAX_FILES" ]; then
-        log_message "NOTE: Scan limited to $CLAMAV_MAX_FILES files (found $RECENT_FILE_COUNT recent files)"
+        log_message "NOTE: Scan limited to the newest $CLAMAV_MAX_FILES files (found $RECENT_FILE_COUNT recent files)"
     fi
-
-    rm -f "$UPLOAD_SCAN_RESULT"
 fi
 
 SCAN_END=$(date +%s)
 SCAN_DURATION=$((SCAN_END - SCAN_START))
 
-# Log structured metrics for Datadog
+# Log structured metrics for Datadog: a detection is a warning whatever else happened
 if [ "$TOTAL_INFECTED_COUNT" -gt 0 ]; then
-    log_metrics "$TOTAL_FILES_SCANNED" "$TOTAL_INFECTED_COUNT" "$STATUS_WARNING"
-else
-    log_metrics "$TOTAL_FILES_SCANNED" "$TOTAL_INFECTED_COUNT" "$STATUS_SUCCESS"
+    SCAN_STATUS="$STATUS_WARNING"
 fi
+log_metrics "$TOTAL_FILES_SCANNED" "$TOTAL_INFECTED_COUNT" "$SCAN_STATUS"
 
 # Handle results - send security-conscious notifications
 if [ "$TOTAL_INFECTED_COUNT" -gt 0 ]; then
@@ -205,11 +224,15 @@ else
             echo "Note: Upload directory scanning was limited to the most recent ${CLAMAV_MAX_FILES} files for operational efficiency."
             echo ""
         fi
+        if [ "$SCAN_STATUS" = "$STATUS_ERROR" ]; then
+            echo "Note: one scan did not complete; see the ERROR line in $LOG_FILE."
+            echo ""
+        fi
         echo "This is a routine security scan confirmation. Historical trends and detailed metrics are available in your monitoring dashboard."
-    } | mail -s "[ClamAV] Daily Scan - Clean - $(hostname)" -r "$CLAMAV_EMAIL_FROM" "$ADMIN_EMAIL"
+    } | mail -s "[ClamAV] Daily Scan - $([ "$SCAN_STATUS" = "$STATUS_ERROR" ] && echo "Incomplete" || echo "Clean") - $(hostname)" -r "$CLAMAV_EMAIL_FROM" "$ADMIN_EMAIL"
 fi
 
-# Clean up
-rm -f "$SYSTEM_SCAN_RESULT" "$RECENT_FILES_LIST"
+# Clean up (the upload files exist only when recent uploads were scanned)
+rm -f "$SYSTEM_SCAN_RESULT" "$RECENT_FILES_LIST" ${UPLOAD_SCAN_RESULT:+"$UPLOAD_SCAN_RESULT"} ${UPLOAD_SCAN_LIST:+"$UPLOAD_SCAN_LIST"}
 
 log_message "Daily scan completed in ${SCAN_DURATION} seconds"
